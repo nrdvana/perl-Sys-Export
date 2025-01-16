@@ -136,6 +136,8 @@ sub append($self, $fileinfo) {
    die "BUG" if length $header & 3;
 
    $self->{fh}->print($header) || die "write: $!";
+   # This is written in multiple parts like this because $fileinfo->{data} might be a File::Map,
+   #  and optimal to pass that directly back to write() without a perl-side concatenation.
    $self->{fh}->print($fileinfo->{data}) || die "write: $!"
       if $size;
    $self->{fh}->print("\0"x(4-($size & 3))) || die "write: $!"
