@@ -166,7 +166,7 @@ sub _elf_interpreters($self) { $self->{elf_interpreters} //= {} }
   $exporter->rewrite_path($src_prefix, $dst_prefix);
 
 Add a path rewrite rule which replaces occurrences of $src_prefix with $dst_prefix.
-Only one rewrite occurs per path; they don't cascade.
+Only one rewrite occurs per path; they don't cascade.  Paths must be absolute starting with '/'.
 
 =cut
 
@@ -174,6 +174,8 @@ sub rewrite_path($self, $orig, $new) {
    my $rw= $self->{path_rewrite_map} //= {};
    croak "Conflicting rewrite supplied for '$orig'"
       if exists $rw->{$orig} && $rw->{$orig} ne $new;
+   $orig =~ m,^/, && $new =~ m,^/,
+      or croak "Paths for rewrite_path must be absolute ($orig => $new)";
    $rw->{$orig}= $new;
    delete $self->{path_rewrite_regex};
    $self;
@@ -252,14 +254,17 @@ If specified directly, file attributes are:
   size            # size, in bytes.  Can be ommitted if 'data' is present
   mtime           # modification time, as per stat
 
+If you don't specify src_path, path rewrites will not be applied to the contents of the file or
+symlink (on the assumption that you used paths relative to the destination).
+
 =cut
 
-our @also_add;
+our @add;
 sub add {
    my $self= shift;
-   push @also_add, @_;
-   while (@also_add) {
-      my $next= shift @also_add;
+   push @add, @_;
+   while (@add) {
+      my $next= shift @add;
       my %file;
       if (ref $next eq 'HASH') {
          %file= %$next;
@@ -276,6 +281,7 @@ sub add {
          @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat $file{data_path}
             or croak "stat '$file{data_path}': $!";
       }
+      # Has this destination already been written?
       if (defined(my $orig= $self->{dst_path_set}{$file{name}})) {
          if (!$self->on_collision) {
             croak "Already wrote a file '$file{name}'".(length $orig? " which came from $orig":"");
@@ -379,71 +385,28 @@ sub _export_file($self, $file) {
          or croak "For regular files, must specify ->{data} or ->{data_path}";
       _map_file($file->{data}, $file->{data_path});
    }
-   my ($tmp, @notes);
-   # Is any path rewriting requested?
-   if ($self->_has_rewrites) {
-      # Check for ELF signature
-      if (substr($file->{data}, 0, 4) eq "\x7fELF") {
-         require Sys::Export::ELF;
-         my $elf= Sys::Export::ELF::unpack($file->{data});
-         my ($interpreter, @libs);
-         if ($elf->{dynamic}) {
-            if ($elf->{needed_libraries}) {
-               @libs= map $self->_resolve_src_library($elf, $_), @{$elf->{needed_libraries}};
-            }
-            if ($elf->{interpreter}) {
-               $self->_elf_interpreters->{$elf->{interpreter}}= 1;
-               $interpreter= $elf->{interpreter};
-            }
-         }
-         # If any dep gets its path rewritten, need to modify interpreter and/or rpath
-         my $rre= $self->path_rewrite_regex;
-         if (grep m/^$rre/, $interpreter, @libs) {
-            $interpreter= $self->get_dst_path($interpreter)
-               if defined $interpreter;
-            my %rpath;
-            for (@libs) {
-               my $dst_lib= $self->get_dst_path($_);
-               $dst_lib =~ s,[^/]+$,,; # path
-               $rpath{$dst_lib}= 1;
-            }
-            my $rpath= join ':', keys %rpath;
-            # Create a temporary file so we can run patchelf on it
-            $tmp= File::Temp->new(DIR => $self->dst_tmp, UNLINK => 0);
-            _syswrite_all($tmp, \$file->{data});
-            _patchelf($tmp, '--set-interpreter' => $interpreter, '--set-rpath' => $rpath);
-            push @notes, '+patchelf';
-         }
-      } elsif (my ($interp, $args)= ($file->{data} =~ /^#!\s*(\S*)\s*(.*)/)) {
-         # Rewrite paths in shell scripts, but only warn about others
-         my $rre= $self->path_rewrite_regex;
-         if ($file->{data} =~ $rre) {
-            if ($interp =~ /\b(bash|ash|dash|sh)$/) {
-               my $rewritten= $self->_rewrite_shell(delete $file->{data});
-               $file->{data}= $rewritten;
-               push @notes, '+rewrite paths';
-            } else {
-               warn "$file->{name} is a script referencing a rewritten path, but don't know how to process it\n";
-               push @notes, "+can't rewrite!";
-            }
-         }
-      }
+   my @notes;
+   # Check for ELF signature
+   if (substr($file->{data}, 0, 4) eq "\x7fELF") {
+      $self->_export_elf_file($file, \@notes);
+   } elsif ($file->{data} =~ m,^#!\s*/,) {
+      $self->_export_script_file($file, \@notes);
    }
    # If writing to an API, load the file data
    if (ref($self->dst) eq 'CODE') {
       # reload temp file if one was used
-      if ($tmp) {
-         delete $file->{data};
-         _map_file($file->{data}, $tmp);
+      if (!exists $file->{data}) {
+         _map_file($file->{data}, $file->{data_path});
       }
-      $self->_log_action("CPY", $file->{src_path}, $file->{name}, join ' ', @notes);
+      $self->_log_action("CPY", $file->{src_path} // '(data)', $file->{name}, join ' ', @notes);
       $self->dst->($self, $file);
    }
    # else if building a staging directory of files, write data to a file
    else {
       # If a temp file was not used, create it now
-      unless ($tmp) {
-         $tmp= File::Temp->new(DIR => $self->dst_tmp, UNLINK => 0);
+      my $tmp= $file->{data_path};
+      unless ($tmp && substr($tmp, 0, length $self->tmp) eq $self->tmp) {
+         $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
          _syswrite_all($tmp, \$file->{data});
       }
       # Apply matching permissions and ownership
@@ -452,10 +415,80 @@ sub _export_file($self, $file) {
       chmod($file->{mode} & 0xFFF, $tmp)
          or croak sprintf("chmod(0%o, %s): %s", $file->{mode} & 0xFFF, $tmp, $!);
       # Rename the temp file into place
-      $self->_log_action("CPY", $file->{src_path}, $file->{name}, join ' ', @notes);
+      $self->_log_action("CPY", $file->{src_path} // '(data)', $file->{name}, join ' ', @notes);
       my $dst= $self->dst . $file->{name};
-      rename("$tmp", $dst)
+      rename($tmp, $dst)
          or croak "rename($tmp, $dst): $!";
+   }
+}
+
+sub _export_elf_file($self, $file, $notes) {
+   require Sys::Export::ELF;
+   my $elf= Sys::Export::ELF::unpack($file->{data});
+   my ($interpreter, @libs);
+   if ($elf->{dynamic}) {
+      if ($elf->{needed_libraries}) {
+         @libs= map $self->_resolve_src_library($_, $elf->{rpath}), @{$elf->{needed_libraries}};
+         push @add, @libs;
+      }
+      if ($elf->{interpreter}) {
+         $self->_elf_interpreters->{$elf->{interpreter}}= 1;
+         $interpreter= $elf->{interpreter};
+         push @add, $interpreter;
+      }
+   }
+   # Is any path rewriting requested?
+   if ($self->_has_rewrites && length $file->{src_path} && defined $interpreter) {
+      # If any dep gets its path rewritten, need to modify interpreter and/or rpath
+      my $rre= $self->path_rewrite_regex;
+      if (grep m/^$rre/, $interpreter, @libs) {
+         $interpreter= $self->get_dst_path($interpreter);
+         my %rpath;
+         for (@libs) {
+            my $dst_lib= $self->get_dst_path($_);
+            $dst_lib =~ s,[^/]+$,,; # path
+            $rpath{$dst_lib}= 1;
+         }
+         my $rpath= join ':', keys %rpath;
+         # Create a temporary file so we can run patchelf on it
+         my $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
+         _syswrite_all($tmp, \$file->{data});
+         _patchelf($tmp, '--set-interpreter' => $interpreter,
+            length $rpath? ('--set-rpath' => $rpath) : ());
+         delete $file->{data};
+         $file->{data_path}= $tmp;
+         push @$notes, '+patchelf';
+      }
+   }
+}
+
+sub _export_script_file($self, $file, $notes) {
+   # Make sure the interpreter is added, and also rewrite its path
+   my ($interp)= ($file->{data} =~ m,^#!\s*(/\S+),)
+      or return;
+   push @add, $interp;
+
+   if ($self->_has_rewrites && length $file->{src_path}) {
+      # rewrite the interpreter, if needed
+      my $rre= $self->path_rewrite_regex;
+      if ($interp =~ s/^$rre/$self->{path_rewrite_map}{$1}/e) {
+         # note file->{data} could be a read-only memory map
+         my $data= delete($file->{data}) =~ s/^(#!\s*)(\S+)/$1$interp/r;
+         $file->{data}= $data;
+      }
+      # Scan the source for paths that need rewritten
+      if ($file->{data} =~ $rre) {
+         # Rewrite paths in shell scripts, but only warn about others.
+         # Rewriting perl scripts would basically require a perl parser...
+         if ($interp =~ m,/(bash|ash|dash|sh)$,) {
+            my $rewritten= $self->_rewrite_shell(delete $file->{data});
+            $file->{data}= $rewritten;
+            push @$notes, '+rewrite paths';
+         } else {
+            warn "$file->{src_path} is a script referencing a rewritten path, but don't know how to process it\n";
+            push @$notes, "+can't rewrite!";
+         }
+      }
    }
 }
 
@@ -470,25 +503,27 @@ sub _export_symlink($self, $file) {
    if (!exists $file->{data}) {
       exists $file->{data_path}
          or croak "Symlink must contain 'data' or 'data_path'";
-      defined($file->{data}= readlink($file->{data_path}))
+      defined( $file->{data}= readlink($file->{data_path}) )
          or croak "readlink($file->{data_path}): $!";
    }
 
-   if ($self->_has_rewrites) {
+   if ($self->_has_rewrites && length $file->{src_path}) {
       my $target= $file->{data};
       my $is_relative= $target =~ m,^[^/],;
       my $rre= $self->path_rewrite_regex;
-      my $orig_path= $file->{src_path};
+      my $src_path= $file->{src_path};
       my $new_path= $file->{name};
 
       # Is it a relative target?  then combine the original path of the symlink with its
       # relative suffix to determine the absolute target.
-      if ($is_relative && defined $orig_path) {
+      if ($is_relative) {
          # consume any leading "./"
          while ($target =~ s,^[.]/,,) {}
          # for each '..', remove one path component
-         
+         ...
       }
+      # Calculate the new path
+      ...
    }
 
    $self->_log_action("SYM", $file->{data}, $file->{name});
