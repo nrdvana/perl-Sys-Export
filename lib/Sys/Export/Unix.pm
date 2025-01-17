@@ -4,7 +4,7 @@ use Carp;
 use Cwd 'abs_path';
 use Fcntl qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT );
 require File::Temp;
-my $map_file= eval { require File::Map; File::Map->can('map_file') }
+my $map_file= eval { require File::Map; File::Map->can('map_file') };
 
 =head1 SYNOPSIS
 
@@ -179,6 +179,50 @@ sub rewrite_path($self, $orig, $new) {
    $self;
 }
 
+sub _has_rewrites($self) {
+   $self->{path_rewrite_map} && %{$self->{path_rewrite_map}}
+}
+
+# Resolve symlinks in paths within $root/ treating absolute links as references to $root.
+# This returns undef if:
+#   * a '..' component tries to exit the src/ root
+#   * the path doesn't exist at any point during resolution
+#   * 'stat' fails at any point in the path (maybe for permissions)
+#   * it resolves more than 256 symlinks
+#   * readlink fails
+# Un-intuitively, this returns a string without a leading '/' because that's what I need below.
+sub _chroot_abs_path($root, $path) {
+   my @base= split '/', $root;
+   my @abs= @base;
+   my @parts= grep length && $_ ne '.', split '/', $path;
+   my $lim= 256;
+   while (@parts) {
+      #use DDP; &p({ base => \@base, abs => \@abs, parts => \@parts });
+      my $part= shift @parts;
+      my $abs= join '/', @abs, $part;
+      my (undef, undef, $mode)= lstat $abs
+         or return undef;
+      if ($part eq '..') {
+         return undef if @abs <= @base;
+         pop @abs;
+      }
+      elsif (S_ISDIR($mode)) {
+         push @abs, $part;
+      }
+      elsif (S_ISLNK($mode)) {
+         return undef if --$lim <= 0;
+         defined (my $newpath= readlink $abs) or return undef;
+         @abs= @base if $newpath =~ m,^/,;
+         unshift @parts, grep length && $_ ne '.', split '/', $newpath;
+      }
+   }
+   return join '/', @abs[scalar @base .. $#abs];
+}
+
+sub _src_abs_path($self, $path) {
+   _chroot_abs_path($self->src, $path);
+}
+
 =head2 add
 
   $exporter->add($src_path);
@@ -220,28 +264,30 @@ sub add {
       if (ref $next eq 'HASH') {
          %file= %$next;
       } else {
-         my $path= $next;
-         $path =~ s,^/,,;
+         $next =~ s,^/,,;
+         # Resolve symlinks within src/ to get the true identity of this file
+         my $path= _chroot_abs_path($self->src, $next);
          # ignore repeat requests
          next if exists $self->{src_path_set}{$path};
-         $self->{src_path_set}{$path}= 1;
          $file{src_path}= $path;
          $file{data_path}= $self->{src} . $path;
          $file{name}= $self->get_dst_path($path);
+         $self->{src_path_set}{$path}= $file{name};
          @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat $file{data_path}
-            or croak "stat '$src': $!";
+            or croak "stat '$file{data_path}': $!";
       }
       if (defined(my $orig= $self->{dst_path_set}{$file{name}})) {
          if (!$self->on_collision) {
-            croak "Already wrote a file '$file{name}'".(length $already? " which came from $orig":"");
+            croak "Already wrote a file '$file{name}'".(length $orig? " which came from $orig":"");
          } elsif ($self->on_collision eq 'ignore') {
             next;
          } elsif ($self->on_collision eq 'overwrite') {
             unlink $self->dst . $file{name} unless ref $self->dst;
          } else {
-            $self->on_collision->($self, $file, $orig);
+            $self->on_collision->($self, \%file, $orig);
          }
       }
+      $self->{dst_path_set}{$file{name}}= $file{src_path};
 
       my $mode= $file{mode};
       if (S_ISREG($mode)) { $self->_export_file(\%file) }
@@ -288,11 +334,14 @@ sub get_dst_path($self, $path) {
 
 sub _map_file {
    if ($map_file) {
-      $map_file->($_[0], $_[1], '<') or die "map_file($_[1]): $!";
+      $map_file->($_[0], $_[1], '<')
+         or die "map_file($_[1]): $!";
    } else {
-      open my $fh, '<:raw', $_[1] or die "open($_[1]): $!";
+      open my $fh, '<:raw', $_[1]
+         or die "open($_[1]): $!";
       my $size= -s $fh;
-      sysread($fh, $_[0], $size) == $size or die "sysread($_[1], $size): $!";
+      sysread($fh, $_[0], $size) == $size
+         or die "sysread($_[1], $size): $!";
    }
 }
 
@@ -314,74 +363,78 @@ sub _export_file($self, $file) {
       if (my $already= $self->_link_map->{"$file->{dev}:$file->{ino}"}) {
          # Yep, make a link of that file instead of copying again
          $self->_log_action("LNK", $already, $file->{name});
-         if (ref $dst && $dst->can('append')) { # CPIO stream
-            $dst->append($file);
-         } elsif (!link($already, $dst)) {
-            die "link($already, $dst): $!";
+         if (ref $self->dst eq 'CODE') { # CPIO stream
+            $self->dst->($self, $file);
+         } else {
+            my $dst= $self->dst . $file->{name};
+            link($already, $dst)
+               or croak "link($already, $dst): $!";
          }
          return;
       }
    }
    # Load the data, unless already provided
    unless (exists $file->{data}) {
-      defined $file->{data_path} or croak "For regular files, must specify ->{data} or ->{data_path}";
-      _map_file $file->{data}, $file->{data_path};
+      defined $file->{data_path}
+         or croak "For regular files, must specify ->{data} or ->{data_path}";
+      _map_file($file->{data}, $file->{data_path});
    }
-   # Check for ELF signature
    my ($tmp, @notes);
-   if (substr($file->{data}, 0, 4) eq "\x7fELF") {
-      require Sys::Export::ELF;
-      my $elf= Sys::Export::ELF::unpack($file->{data});
-      my ($interpreter, @libs);
-      if ($elf->{dynamic}) {
-         if ($elf->{needed_libraries}) {
-            @libs= map $self->_resolve_src_library($elf, $_), @{$elf->{needed_libraries}};
+   # Is any path rewriting requested?
+   if ($self->_has_rewrites) {
+      # Check for ELF signature
+      if (substr($file->{data}, 0, 4) eq "\x7fELF") {
+         require Sys::Export::ELF;
+         my $elf= Sys::Export::ELF::unpack($file->{data});
+         my ($interpreter, @libs);
+         if ($elf->{dynamic}) {
+            if ($elf->{needed_libraries}) {
+               @libs= map $self->_resolve_src_library($elf, $_), @{$elf->{needed_libraries}};
+            }
+            if ($elf->{interpreter}) {
+               $self->_elf_interpreters->{$elf->{interpreter}}= 1;
+               $interpreter= $elf->{interpreter};
+            }
          }
-         if ($elf->{interpreter}) {
-            $self->_elf_interpreters->{$elf->{interpreter}}= 1;
-            $interpreter= $elf->{interpreter};
+         # If any dep gets its path rewritten, need to modify interpreter and/or rpath
+         my $rre= $self->path_rewrite_regex;
+         if (grep m/^$rre/, $interpreter, @libs) {
+            $interpreter= $self->get_dst_path($interpreter)
+               if defined $interpreter;
+            my %rpath;
+            for (@libs) {
+               my $dst_lib= $self->get_dst_path($_);
+               $dst_lib =~ s,[^/]+$,,; # path
+               $rpath{$dst_lib}= 1;
+            }
+            my $rpath= join ':', keys %rpath;
+            # Create a temporary file so we can run patchelf on it
+            $tmp= File::Temp->new(DIR => $self->dst_tmp, UNLINK => 0);
+            _syswrite_all($tmp, \$file->{data});
+            _patchelf($tmp, '--set-interpreter' => $interpreter, '--set-rpath' => $rpath);
+            push @notes, '+patchelf';
          }
-      }
-      # If any dep gets its path rewritten, need to modify interpreter and/or rpath
-      my $rre= $self->path_rewrite_regex;
-      if (grep m/^$rre/, $interpreter, @libs) {
-         $interpreter= $self->get_dst_path($interpreter)
-            if defined $interpreter;
-         my %rpath;
-         for (@libs) {
-            my $dst_lib= $self->get_dst_path($_);
-            $dst_lib =~ s,[^/]+$,,; # path
-            $rpath{$dst_lib}= 1;
-         }
-         my $rpath= join ':', keys %rpath;
-         # Create a temporary file so we can run patchelf on it
-         $tmp= File::Temp->new(DIR => $self->dst_tmp, UNLINK => 0);
-         _syswrite_all($tmp, \$file->{data});
-         my ($out, $err, $wstat)= _capture_cmd('patchelf', '--set-interpreter', $interpreter, '--set-rpath', $rpath, $tmp);
-         $wstat == 0 or die "patchelf on '$tmp' failed";
-         push @notes, '+patchelf';
-      }
-   } elsif (my ($interp, $args)= ($file->{data} =~ /^#!\s*(\S*)\s*(.*)/)) {
-      # Rewrite paths in shell scripts, but only warn about others
-      my $rre= $self->path_rewrite_regex;
-      if ($contents =~ $rre) {
-         if ($interp =~ /\b(bash|ash|dash|sh)$/) {
-            my $rewriten= $self->_rewrite_shell(delete $file->{data});
-            $file->{data}= $rewritten;
-            push @notes, '+rewrite paths';
-         } else {
-            warn "$path is a script referencing a rewritten path, but don't know how to process it\n";
-            push @notes, "+can't rewrite!";
+      } elsif (my ($interp, $args)= ($file->{data} =~ /^#!\s*(\S*)\s*(.*)/)) {
+         # Rewrite paths in shell scripts, but only warn about others
+         my $rre= $self->path_rewrite_regex;
+         if ($file->{data} =~ $rre) {
+            if ($interp =~ /\b(bash|ash|dash|sh)$/) {
+               my $rewritten= $self->_rewrite_shell(delete $file->{data});
+               $file->{data}= $rewritten;
+               push @notes, '+rewrite paths';
+            } else {
+               warn "$file->{name} is a script referencing a rewritten path, but don't know how to process it\n";
+               push @notes, "+can't rewrite!";
+            }
          }
       }
    }
-
    # If writing to an API, load the file data
    if (ref($self->dst) eq 'CODE') {
       # reload temp file if one was used
       if ($tmp) {
          delete $file->{data};
-         _map_file $file->{data}, $tmp;
+         _map_file($file->{data}, $tmp);
       }
       $self->_log_action("CPY", $file->{src_path}, $file->{name}, join ' ', @notes);
       $self->dst->($self, $file);
@@ -394,16 +447,20 @@ sub _export_file($self, $file) {
          _syswrite_all($tmp, \$file->{data});
       }
       # Apply matching permissions and ownership
-      chown($stat->{uid}, $stat->{gid}, $tmp) || croak "chown($uid, $gid, $tmp): $!";
-      chmod($stat->{mode} & 0xFFF, $tmp) || croak sprintf("chmod(0%o, %s): %s", $stat->{mode} & 0xFFF, $tmp, $!);
+      chown($file->{uid}, $file->{gid}, $tmp)
+         or croak "chown($file->{uid}, $file->{gid}, $tmp): $!";
+      chmod($file->{mode} & 0xFFF, $tmp)
+         or croak sprintf("chmod(0%o, %s): %s", $file->{mode} & 0xFFF, $tmp, $!);
       # Rename the temp file into place
-      $self->_log_action("CPY", $path, $file->{name}, join ' ', @notes);
+      $self->_log_action("CPY", $file->{src_path}, $file->{name}, join ' ', @notes);
+      my $dst= $self->dst . $file->{name};
       rename("$tmp", $dst)
-         or croak "rename($tmp, $dst): $err";
+         or croak "rename($tmp, $dst): $!";
    }
 }
 
 sub _rewrite_shell($self, $contents) {
+   my $rre= $self->path_rewrite_regex;
    # only replace path matches when following certain characters which
    # indicate the start of a path.
    $contents =~ s/(?<=[ '"><\n#])$rre/$self->{path_rewrite_map}{$1}/ger;
@@ -416,6 +473,24 @@ sub _export_symlink($self, $file) {
       defined($file->{data}= readlink($file->{data_path}))
          or croak "readlink($file->{data_path}): $!";
    }
+
+   if ($self->_has_rewrites) {
+      my $target= $file->{data};
+      my $is_relative= $target =~ m,^[^/],;
+      my $rre= $self->path_rewrite_regex;
+      my $orig_path= $file->{src_path};
+      my $new_path= $file->{name};
+
+      # Is it a relative target?  then combine the original path of the symlink with its
+      # relative suffix to determine the absolute target.
+      if ($is_relative && defined $orig_path) {
+         # consume any leading "./"
+         while ($target =~ s,^[.]/,,) {}
+         # for each '..', remove one path component
+         
+      }
+   }
+
    $self->_log_action("SYM", $file->{data}, $file->{name});
    if (ref($self->dst) eq 'CODE') {
       $self->dst->($self, $file);
@@ -445,7 +520,10 @@ sub _patchelf($self, $path, %attrs) {
       croak "Missing tool 'patchelf'"
          unless $patchelf;
    }
-   $patchelf
+   my ($out, $err, $wstat)= _capture_cmd($patchelf, %attrs, $path);
+   $wstat == 0
+      or croak "patchelf '$path' failed: $err";
+   1;
 }
 
 1;
