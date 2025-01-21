@@ -84,7 +84,7 @@ sub new {
    defined $attrs{src} or croak "Require 'src' attribute";
    my $abs_src= abs_path($attrs{src} =~ s,(?<=[^/])$,/,r)
       or croak "src directory '$attrs{src}' does not exist";
-   $attrs{src}= $abs_src eq '/'? $abs_src : "$abs_src/";
+   $attrs{src_abs}= $abs_src eq '/'? $abs_src : "$abs_src/";
 
    defined $attrs{dst} or croak "Require 'dst' attribute";
    unless (ref $attrs{dst} eq 'CODE') {
@@ -114,25 +114,36 @@ sub new {
 
 =head2 src
 
-The abs_path of the root of the source filesystem.  Always ends with '/'.
+The root of the source filesystem.
+
+=head2 src_abs
+
+The C<abs_path> of the root of the source filesystem, always ending with '/'.
 
 =head2 dst
 
-The abs_path of the root of the destination filesystem (always ends with '/')
-OR, a coderef which reseives files which are ready to be recorded.
+The root of the destination filesystem, OR a coderef which receives files which are ready to be
+recorded.
+
+=head2 dst_abs
+
+The C<abs_path> of the root of the destination filesystem, always ending with '/'.
+Only defined if L<dst> is not a coderef.
 
 =head2 tmp
 
-The abs_path of a directory to use for temporary staging before renaming into L</dst>.
+The C<abs_path> of a directory to use for temporary staging before renaming into L</dst>.
 
-=head2 path_set
+=head2 src_path_set
 
 A hashref of all source paths which have been processed, and which destination path they were
-written as.  All paths are stored as relative, without a leading slash.
+written as.  All paths relative, without a leading slash.
 
-=head2 path_rewrite_regex
+=head2 dst_path_set
 
-A regex that matches the longest prefix of a source path having a rewrite rule.
+A hashref of all destination paths which have been created (as keys).  If the value of the key
+is defined, it is the source path.  If not defined, it means the destination was created
+without reference to a source path.
 
 =head2 uid_set
 
@@ -144,20 +155,35 @@ The set of numeric group IDs seen while copying paths.
 
 =cut
 
-sub src($self) { $self->{src} }
-sub dst($self) { $self->{dst} }
-sub tmp($self) { $self->{tmp} }
+sub src($self)          { $self->{src} }
+sub src_abs($self)      { $self->{src_abs} }
+sub dst($self)          { $self->{dst} }
+sub dst_abs($self)      { $self->{dst_abs} }
+sub tmp($self)          { $self->{tmp} }
+sub src_path_set($self) { $self->{src_path_set} //= {} }
+sub dst_path_set($self) { $self->{dst_path_set} //= {} }
+sub uid_set($self)      { $self->{uid_set} //= {} }
+sub gid_set($self)      { $self->{gid_set} //= {} }
+
+=head2 path_rewrite_regex
+
+A regex that matches the longest prefix of a source path having a rewrite rule.
+
+=cut
+
 sub path_rewrite_regex($self) {
    $self->{path_rewrite_regex} //= do {
       my $alt= join '|', map quotemeta, reverse sort keys %{$self->{path_rewrite_map} // {}};
       length $alt? qr/($alt)/ : qr/(*FAIL)/;
    };
 }
-sub src_path_set($self) { $self->{src_path_set} //= {} }
-sub dst_path_set($self) { $self->{dst_path_set} //= {} }
-sub uid_set($self) { $self->{uid_set} //= {} }
-sub gid_set($self) { $self->{gid_set} //= {} }
+
+# a hashref tracking files with link-count higher than 1, so that hardlinks can be preserved.
+# the keys are "$dev:$ino"
 sub _link_map($self) { $self->{link_map} //= {} }
+
+# a hashref listing all the interpreters that have been discovered for programs
+# and scripts copied to dst.  The keys are the relative source path.
 sub _elf_interpreters($self) { $self->{elf_interpreters} //= {} }
 
 sub DESTROY($self, @) {
@@ -165,20 +191,6 @@ sub DESTROY($self, @) {
 }
 
 =head1 METHODS
-
-=head2 dst_abs
-
-  my $abs= $export->dst_abs;
-  my $abs= $export->dst_abs($path);
-
-If L<dst> is not a coderef, return the absolute pathname of L<dst> followed by a trailing '/',
-and optionally the provided C<$path>.  If C<dst> is a coderef, return undef.
-
-=cut
-
-sub dst_abs($self, $path= '') {
-   return ref $self->dst eq 'CODE'? undef : $self->{dst_abs} . $path;
-}
 
 =head2 rewrite_path
 
@@ -283,27 +295,40 @@ sub _log_action($self, $verb, $src, $dst, @notes) {
    printf "     %s\n", $_ for @notes;
 }
 
-our @add;
 sub add {
    my $self= shift;
-   push @add, @_;
-   while (@add) {
-      my $next= shift @add;
+   my $add= ($self->{add} //= []);
+   push @$add, @_;
+   while (@$add) {
+      my $next= shift @$add;
       my %file;
       if (ref $next eq 'HASH') {
          %file= %$next;
       } else {
          $next =~ s,^/,,;
-         # Resolve symlinks within src/ to get the true identity of this file
-         my $path= _chroot_abs_path($self->src, $next);
+         @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$next)
+            or croak "lstat '$self->{src_abs}$next': $!";
+         # If $next is itself a symlink, we want to export this name, and also the thing
+         # it references.
+         if (S_ISLNK($file{mode})) {
+            # resolve symlinks in the path leading up to this symlink
+            my $parent= $next =~ s,[^/]+$,,r;
+            $next= _chroot_abs_path($self->{src_abs}, $parent) . ($next =~ m,(/[^/]+)$,)[0]
+               if length $parent;
+            # add this symlink target to the paths to be exported
+            my $target= readlink($self->{src_abs}.$next);
+            $target= $parent . $target unless $target =~ m,^/,;
+            unshift @$add, $target;
+         } else {
+            # Resolve symlinks within src/ to get the true identity of this file
+            $next= _chroot_abs_path($self->{src_abs}, $next);
+         }
          # ignore repeat requests
-         next if exists $self->{src_path_set}{$path};
-         $file{src_path}= $path;
-         $file{data_path}= $self->{src} . $path;
-         $file{name}= $self->get_dst_path($path);
-         $self->{src_path_set}{$path}= $file{name};
-         @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat $file{data_path}
-            or croak "stat '$file{data_path}': $!";
+         next if exists $self->{src_path_set}{$next};
+         $file{src_path}= $next;
+         $file{data_path}= $self->{src_abs} . $next;
+         $file{name}= $self->get_dst_for_src($next);
+         $self->{src_path_set}{$next}= $file{name};
       }
       # Has this destination already been written?
       if (defined(my $orig= $self->{dst_path_set}{$file{name}})) {
@@ -312,7 +337,8 @@ sub add {
          } elsif ($self->on_collision eq 'ignore') {
             next;
          } elsif ($self->on_collision eq 'overwrite') {
-            unlink $self->dst_abs($file{name}) unless ref $self->dst eq 'CODE'
+            unlink $self->dst_abs . $file{name}
+               if defined $self->dst_abs;
          } else {
             $self->on_collision->($self, \%file, $orig);
          }
@@ -322,7 +348,7 @@ sub add {
          my $dst_parent= $file{name} =~ s,/?[^/]+$,,r;
          if (length $dst_parent && !exists $self->{dst_path_set}{$dst_parent}) {
             # if writing to a real dir, check whether it already exists by some other means
-            if (ref $self->dst ne 'CODE' && -d $self->dst_abs($dst_parent)) {
+            if (ref $self->dst ne 'CODE' && -d $self->dst_abs . $dst_parent) {
                # no need to do anything, but record that we have it
                $self->{dst_path_set}{$dst_parent}= undef;
             }
@@ -334,14 +360,14 @@ sub add {
                if (!$self->_has_rewrites) {
                   $src_parent //= $dst_parent;
                }
-               elsif (!defined $src_parent || $self->get_dst_path($src_parent) ne $dst_parent) {
+               elsif (!defined $src_parent || $self->get_dst_for_src($src_parent) ne $dst_parent) {
                   # No src_path means we don't have an origin for this file, so no official
                   # origin for its parent directory, either.  But, maybe a directory of the
                   # same name exists in src_path.
                   # If so, use it, else create a generic directory.
                   my %dir= ( name => $dst_parent );
                   if ((@dir{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}
-                     = lstat $self->{src} . $dst_parent)
+                     = lstat $self->{src_abs} . $dst_parent)
                      && S_ISDIR($dir{mode})
                   ) {
                      $src_parent= \%dir;
@@ -349,7 +375,7 @@ sub add {
                      $src_parent= { name => $dst_parent, mode => (S_IFDIR | 0755) };
                   }
                }
-               unshift @add, $src_parent, \%file;
+               unshift @$add, $src_parent, \%file;
                next;
             }
          }
@@ -401,16 +427,16 @@ sub finish($self) {
    }
 }
 
-=head2 get_dst_path
+=head2 get_dst_for_src
 
-  my $dst_path= $exporter->get_dst_path($src_path);
+  my $dst_path= $exporter->get_dst_for_src($src_path);
 
 Returns the relative destination path for a relative source path, rewritten according to the
 rewrite rules.  If no rewrites exist, this just returns C<$src_path>.
 
 =cut
 
-sub get_dst_path($self, $path) {
+sub get_dst_for_src($self, $path) {
    my $rre= $self->path_rewrite_regex;
    return scalar($path =~ s/^$rre/$self->{path_rewrite_map}{$1}/er);
 }
@@ -436,7 +462,7 @@ sub _export_file($self, $file) {
          if (ref $self->dst eq 'CODE') { # CPIO stream
             $self->dst->($self, $file);
          } else {
-            my $dst= $self->dst_abs($file->{name});
+            my $dst= $self->dst_abs . $file->{name};
             link($already, $dst)
                or croak "link($already, $dst): $!";
          }
@@ -477,7 +503,7 @@ sub _export_file($self, $file) {
       $self->_apply_stat("$tmp", $file);
       # Rename the temp file into place
       $self->_log_action("CPY", $file->{src_path} // '(data)', $file->{name}, @notes);
-      my $dst= $self->dst_abs($file->{name});
+      my $dst= $self->dst_abs . $file->{name};
       rename($tmp, $dst)
          or croak "rename($tmp, $dst): $!";
    }
@@ -490,12 +516,12 @@ sub _export_elf_file($self, $file, $notes) {
    if ($elf->{dynamic}) {
       if ($elf->{needed_libraries}) {
          @libs= map $self->_resolve_src_library($_, $elf->{rpath}), @{$elf->{needed_libraries}};
-         push @add, @libs;
+         push @{$self->{add}}, @libs;
       }
       if ($elf->{interpreter}) {
          $self->_elf_interpreters->{$elf->{interpreter}}= 1;
          $interpreter= $elf->{interpreter};
-         push @add, $interpreter;
+         push @{$self->{add}}, $interpreter;
       }
    }
    # Is any path rewriting requested?
@@ -503,10 +529,10 @@ sub _export_elf_file($self, $file, $notes) {
       # If any dep gets its path rewritten, need to modify interpreter and/or rpath
       my $rre= $self->path_rewrite_regex;
       if (grep m/^$rre/, $interpreter, @libs) {
-         $interpreter= $self->get_dst_path($interpreter);
+         $interpreter= $self->get_dst_for_src($interpreter);
          my %rpath;
          for (@libs) {
-            my $dst_lib= $self->get_dst_path($_);
+            my $dst_lib= $self->get_dst_for_src($_);
             $dst_lib =~ s,[^/]+$,,; # path
             $rpath{$dst_lib}= 1;
          }
@@ -527,7 +553,7 @@ sub _export_script_file($self, $file, $notes) {
    # Make sure the interpreter is added, and also rewrite its path
    my ($interp)= ($file->{data} =~ m,^#!\s*(/\S+),)
       or return;
-   push @add, $interp;
+   push @{$self->{add}}, $interp;
 
    if ($self->_has_rewrites && length $file->{src_path}) {
       # rewrite the interpreter, if needed
@@ -565,7 +591,7 @@ sub _export_dir($self, $dir) {
    if (ref $self->dst eq 'CODE') {
       $self->dst->($self, $dir);
    } else {
-      my $dst_abs= $self->dst_abs($dir->{name});
+      my $dst_abs= $self->dst_abs . $dir->{name};
       mkdir($dst_abs)
          or croak "mkdir($dst_abs): $!";
       $self->_apply_stat($dst_abs, $dir);
@@ -603,7 +629,7 @@ sub _export_symlink($self, $file) {
    if (ref($self->dst) eq 'CODE') {
       $self->dst->($self, $file);
    } else {
-      my $dst_abs= $self->dst_abs($file->{name});
+      my $dst_abs= $self->dst_abs . $file->{name};
       symlink($file->{data}, $dst_abs)
          or croak "symlink($file->{data}, $dst_abs): $!";
       $self->_apply_stat($dst_abs, $file);
@@ -618,7 +644,7 @@ sub _export_devnode($self, $file) {
       $file->{rdev_minor} //= $minor;
       $self->dst->($self, $file);
    } else {
-      my $dst_abs= $self->dst_abs($file->{name});
+      my $dst_abs= $self->dst_abs . $file->{name};
       _mknod_or_die($dst_abs, $file->{mode}, $file->{rdev});
       $self->_apply_stat($dst_abs, $file);
    }
@@ -630,7 +656,7 @@ sub _export_fifo($self, $file) {
       $self->dst->($self, $file);
    } else {
       require POSIX;
-      my $dst_abs= $self->dst_abs($file->{name});
+      my $dst_abs= $self->dst_abs . $file->{name};
       POSIX::mkfifo($dst_abs, $file->{mode})
          or croak "mkfifo($dst_abs): $!";
       $self->_apply_stat($dst_abs, $file);
@@ -650,6 +676,8 @@ sub _apply_stat($self, $abs_path, $stat) {
       POSIX::lchown($uid, $gid, $abs_path) or croak "lchown($uid, $gid, $abs_path): $!"
          if $uid >= 0 || $gid >= 0;
    }
+   $self->uid_set->{$uid}++ if $uid >= 0;
+   $self->gid_set->{$gid}++ if $gid >= 0;
 
    my @delayed;
 
