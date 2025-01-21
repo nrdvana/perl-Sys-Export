@@ -9,6 +9,9 @@ my $tmp= File::Temp->newdir;
 mkdir "$tmp/usr";
 mkdir "$tmp/usr/bin";
 mkdir "$tmp/usr/local";
+open my $out, '>', "$tmp/usr/local/datafile";
+$out->print("Just some data");
+$out->close;
 symlink "/usr/bin", "$tmp/bin";
 symlink "/bin", "$tmp/usr/local/bin";
 symlink "../bin", "$tmp/usr/local/sbin";
@@ -19,6 +22,7 @@ note "exporter src: '".$exporter->src."'";
 for (
    [ 'usr/local/bin'  => 'usr/bin' ],
    [ 'usr/local/sbin' => 'usr/bin' ],
+   [ 'usr/local/datafile' => 'usr/local/datafile' ],
 ) {
    is( $exporter->_src_abs_path( $_->[0] ), $_->[1], $_->[0] );
 }

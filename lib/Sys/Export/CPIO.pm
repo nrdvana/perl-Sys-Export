@@ -3,6 +3,7 @@ use v5.36;
 use Fcntl qw( S_IFDIR S_IFMT );
 use Scalar::Util 'blessed';
 use Carp;
+require Sys::Export::Unix; # for _dev_major_minor 
 
 =head1 SYNOPSIS
 
@@ -83,25 +84,13 @@ data to the stream, padding as necessary.
 
 =cut
 
-BEGIN {
-   eval(
-      eval { require Unix::Mknod; }
-      ? 'sub _major_minor($dev) { Unix::Mknod::major($dev), Unix::Mknod::minor($dev) } 1'
-      : 'sub _major_minor($dev) {
-         use integer;
-         ( (($dev >> 8) & 0xfff) | (($dev >> 31 >> 1) & 0xfffff000) ),
-         ( ($dev & 0xff) | (($dev >> 12) & 0xffffff00) )
-        } 1'
-   ) or die "$@";
-}
-
 sub append($self, $fileinfo) {
    my ($dev, $dev_major, $dev_minor, $ino, $mode, $nlink, $uid, $gid, $rdev, $rdev_major, $rdev_minor, $mtime, $name)
       = @{$fileinfo}{qw( dev dev_major dev_minor ino mode nlink uid gid rdev rdev_major rdev_minor mtime name )};
    # best-effort to extract major/minor from dev and rdev, unless user specified them
-   ($dev_major, $dev_minor)= _major_minor($dev)
+   ($dev_major, $dev_minor)= Sys::Export::Unix::_dev_major_minor($dev)
       if defined $dev and !defined $dev_major || !defined $dev_minor;
-   ($rdev_major, $rdev_minor)= _major_minor($rdev)
+   ($rdev_major, $rdev_minor)= Sys::Export::Unix::_dev_major_minor($rdev)
       if defined $rdev and !defined $rdev_major || !defined $rdev_minor;
    defined $mode or croak "require 'mode'";
    defined $name or croak "require 'name'";
@@ -137,7 +126,7 @@ sub append($self, $fileinfo) {
 
    $self->{fh}->print($header) || die "write: $!";
    # This is written in multiple parts like this because $fileinfo->{data} might be a File::Map,
-   #  and optimal to pass that directly back to write() without a perl-side concatenation.
+   #  and optimal to pass that directly back to fprint without a perl-side concatenation.
    $self->{fh}->print($fileinfo->{data}) || die "write: $!"
       if $size;
    $self->{fh}->print("\0"x(4-($size & 3))) || die "write: $!"
