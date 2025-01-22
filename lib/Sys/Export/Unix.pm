@@ -205,7 +205,9 @@ sub rewrite_path($self, $orig, $new) {
    my $rw= $self->{path_rewrite_map} //= {};
    croak "Conflicting rewrite supplied for '$orig'"
       if exists $rw->{$orig} && $rw->{$orig} ne $new;
-   $orig =~ m,^/, && $new =~ m,^/,
+   $orig =~ s,^/,,;
+   $new =~ s,^/,,;
+   $orig !~ m,^[.]+/, && $new !~ m,^[.]+/,
       or croak "Paths for rewrite_path must be absolute ($orig => $new)";
    $rw->{$orig}= $new;
    delete $self->{path_rewrite_regex};
@@ -253,7 +255,7 @@ sub _chroot_abs_path($root, $path) {
 }
 
 sub _src_abs_path($self, $path) {
-   _chroot_abs_path($self->src, $path);
+   _chroot_abs_path($self->{src_abs}, $path);
 }
 
 =head2 add
@@ -313,7 +315,7 @@ sub add {
          if (S_ISLNK($file{mode})) {
             # resolve symlinks in the path leading up to this symlink
             my $parent= $next =~ s,[^/]+$,,r;
-            $next= _chroot_abs_path($self->{src_abs}, $parent) . ($next =~ m,(/[^/]+)$,)[0]
+            $next= $self->_src_abs_path($parent) . ($next =~ m,(/[^/]+)$,)[0]
                if length $parent;
             # add this symlink target to the paths to be exported
             my $target= readlink($self->{src_abs}.$next);
@@ -321,7 +323,7 @@ sub add {
             unshift @$add, $target;
          } else {
             # Resolve symlinks within src/ to get the true identity of this file
-            $next= _chroot_abs_path($self->{src_abs}, $next);
+            $next= $self->_src_abs_path($next);
          }
          # ignore repeat requests
          next if exists $self->{src_path_set}{$next};
@@ -330,6 +332,7 @@ sub add {
          $file{name}= $self->get_dst_for_src($next);
          $self->{src_path_set}{$next}= $file{name};
       }
+
       # Has this destination already been written?
       if (defined(my $orig= $self->{dst_path_set}{$file{name}})) {
          if (!$self->on_collision) {
@@ -407,7 +410,7 @@ presumably because you're handling that one specially in some other way.
 
 sub skip($self, $path) {
    $path =~ s,^/,,;
-   $self->{src_path_set}{$path} //= \'skipped';
+   $self->{src_path_set}{$path} //= undef;
    $self;
 }
 
@@ -607,22 +610,56 @@ sub _export_symlink($self, $file) {
    }
 
    if ($self->_has_rewrites && length $file->{src_path}) {
-      my $target= $file->{data};
-      my $is_relative= $target =~ m,^[^/],;
-      my $rre= $self->path_rewrite_regex;
-      my $src_path= $file->{src_path};
-      my $new_path= $file->{name};
-
-      # Is it a relative target?  then combine the original path of the symlink with its
-      # relative suffix to determine the absolute target.
-      if ($is_relative) {
-         # consume any leading "./"
-         while ($target =~ s,^[.]/,,) {}
-         # for each '..', remove one path component
-         ...
+      # Absolute links just need a simple rewrite on the target
+      if ($file->{data} =~ m,^/,) {
+         $file->{data}= $self->get_dst_for_src($file->{data});
       }
-      # Calculate the new path
-      ...
+      # Relative links are tricky.  A "100%" solution might actually be impossible, because
+      # users could intend for all sorts of different behavior with symlinks, but at least try
+      # to DWIM here.
+      else {
+         # Example:  /usr/local/bin/foo -> ../../bin/bar, but both paths are being rewritten to /bin
+         #   The correct symlink is then just /bin/foo -> bar
+         # Example:  /usr/local/share/mydata -> ../../../opt/mydata, but /opt/mydata is a
+         #   symlink to /opt/mydata-1.2.3, and /usr/local/share is getting rewritten to /share.
+         #   The user may want this double redirection to remain so that mydata can be swapped
+         #   for different versions, so can't just resolve everything to an absolute path.
+         #   The correct symlink should probably be /share/mydata -> ../opt/mydata
+         # Example:  /usr/local/share/mydata/lib -> ../../../../opt/mydata/current/../lib
+         #   where /usr/local/share is getting rewritten and /opt/mydata is getting rewritten,
+         #   and /opt/mydata/current is a symlink that breaks assumptions about '..'
+         #   The correct symlink should probably be /share/mydata/lib -> ../../opt/mydata/current/../lib
+         #   Note that /opt/mydata/current symlink might not even exist in dst yet (to be able
+         #    to resolve it) and resolving the one in src might not be what the user wants.
+         
+         # I think the answer here is to consume all leading '..' in the symlink path
+         # (src_path is already absolute, so no danger of '..' meaning something different)
+         # then add all following non-'..' to arrive at a new src_target, then rewrite that to
+         # the corresponding dst_target, then create a relative path from the dst symlink to
+         # that dst_path, then append any additional portions of the original symlink as-is.
+         my @src_parts= split '/', $file->{src_path};
+         pop @src_parts; # discard name of symlink itself
+         my @target_parts= grep $_ ne '.', split '/', $file->{data};
+         while (@target_parts && $target_parts[0] eq '..') {
+            shift @target_parts;
+            pop @src_parts;
+         }
+         while (@target_parts && $target_parts[0] ne '..') {
+            push @src_parts, shift @target_parts;
+         }
+         my @dst_target= split '/', $self->get_dst_for_src(join '/', @src_parts);
+         # now construct a relative path from $file->{name} to $dst_target
+         my @dst_parts= split '/', $file->{name};
+         pop @dst_parts; # discard name of symlink itself
+         # remove common prefix
+         while (@dst_parts && @dst_target && $dst_parts[0] eq $dst_target[0]) {
+            shift @dst_parts;
+            shift @dst_target;
+         }
+         # assemble '..' for each remaining piece of dst_parts, then the path to dst-target,
+         # then the remainder of original path components (if any)
+         $file->{data}= join '/', (('..') x scalar @dst_parts), @dst_target, @target_parts;
+      }
    }
 
    $self->_log_action('SYM', $file->{data}, $file->{name});
