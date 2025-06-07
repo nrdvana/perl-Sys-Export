@@ -323,7 +323,9 @@ sub add {
             unshift @$add, $target;
          } else {
             # Resolve symlinks within src/ to get the true identity of this file
-            $next= $self->_src_abs_path($next);
+            my $abs= $self->_src_abs_path($next);
+            defined $abs or croak "Can't resolve absolute path of '$next'";
+            $next= $abs;
          }
          # ignore repeat requests
          next if exists $self->{src_path_set}{$next};
@@ -512,13 +514,24 @@ sub _export_file($self, $file) {
    }
 }
 
+sub _resolve_src_library($self, $libname, $rpath) {
+   my @paths= (length $rpath? (grep length, split /:/, $rpath) : (), qw( lib lib64 usr/lib usr/lib64 ));
+   for my $path (@paths) {
+      return "$path/$libname" if -e "$path/$libname";
+   }
+   return ();
+}
+
 sub _export_elf_file($self, $file, $notes) {
    require Sys::Export::ELF;
    my $elf= Sys::Export::ELF::unpack($file->{data});
    my ($interpreter, @libs);
    if ($elf->{dynamic}) {
       if ($elf->{needed_libraries}) {
-         @libs= map $self->_resolve_src_library($_, $elf->{rpath}), @{$elf->{needed_libraries}};
+         for (@{$elf->{needed_libraries}}) {
+            my $lib= $self->_resolve_src_library($_, $elf->{rpath}) // carp("Can't find lib $_ needed for $file");
+            push @libs, $lib if $lib;
+         }
          push @{$self->{add}}, @libs;
       }
       if ($elf->{interpreter}) {
@@ -762,7 +775,7 @@ sub _load_file {
    open my $fh, "<:raw", $_[1]
       or die "open($_[1]): $!";
    my $size= -s $fh;
-   sysread($fh, $_[0], $size) == $size
+   sysread($fh, ($_[0] //= ''), $size) == $size
       or die "sysread($_[1], $size): $!";
 }
 *_load_or_map_file= $have_file_map? sub { File::Map::map_file($_[0], $_[1], "<") }
