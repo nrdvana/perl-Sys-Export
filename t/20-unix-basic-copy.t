@@ -1,7 +1,6 @@
-use lib __FILE__ =~ s,[^/]+$,lib,r;
-use Test2WithExplain;
 use v5.36;
-use File::Temp;
+use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
+use Test2AndUtils;
 use Sys::Export::Unix;
 use File::stat;
 use Fcntl qw( S_IFDIR S_IFREG S_IFLNK );

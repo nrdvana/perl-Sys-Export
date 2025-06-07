@@ -1,5 +1,6 @@
-use Test2::V0;
 use v5.36;
+use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
+use Test2AndUtils;
 use Sys::Export::CPIO;
 
 my $buffer;
