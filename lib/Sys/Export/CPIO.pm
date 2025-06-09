@@ -1,4 +1,8 @@
 package Sys::Export::CPIO;
+
+# ABSTRACT: Write CPIO archives needed for Linux initrd
+# VERSION
+
 use v5.36;
 use Fcntl qw( S_IFDIR S_IFMT );
 use Scalar::Util 'blessed';
@@ -29,8 +33,8 @@ be written as zero and the data will be skipped. (this is the way cpio stores ha
 
 =item rdev
 
-You can pass the C<rdev> received from C<stat>, and this module makes a best-effort to break that
-down into the major/minor numbers needed for cpio, but perl doesn't have access to the real
+You can pass the C<rdev> received from C<stat>, and this module makes a best-effort to break
+that down into the major/minor numbers needed for cpio, but perl doesn't have access to the real
 major/minor functions of your platform unless you install L<Unix::Mknod>.  If you were trying
 to creaate a device node from pure configuration rather than the filesystem, just pass
 C<rdev_major> and C<rdev_minor> instead of C<rdev>.
@@ -45,6 +49,30 @@ Pass C<< (virtual_inodes => 0) >> to the constructor to disable this feature.
 
 =back
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+  my $cpio= Sys::Export::CPIO->new($fh_or_filename, %attrs);
+
+The first argument is either a file handle object implementing 'print', or a file name.
+If it is a file name, it is immediately opened in 'raw' mode and dies on failure.
+
+The rest of the arguments can be used to initialize attributes.
+
+=cut
+
+sub new($class, $f, @attrs) {
+   my $fh= blessed $f && $f->can('print')? $f
+      : do { open my $x, '>:raw', $f or die "open($f): $!"; $x };
+   my $self= bless { fh => $fh, seen_inode => {}, ino => 0, virtual_inodes => 1 }, $class;
+   while (@attrs) {
+      my ($attr, $val)= splice(@attrs, 0, 2);
+      $self->$attr($val);
+   }
+   $self;
+}
+
 =head1 ATTRIBUTES
 
 =head2 virtual_inodes
@@ -54,13 +82,10 @@ a linear sequence for a virtual inode on each file.
 
 =cut
 
-sub new($class, $f, %attrs) {
-   my $fh= blessed $f && $f->can('print')? $f
-      : do { open my $x, '>', $f or die "open($f): $!"; $x };
-   bless { fh => $fh, seen_inode => {}, ino => 0, virtual_inodes => 1, %attrs }, $class;
+sub virtual_inodes {
+   $_[0]{virtual_inodes}= !!$_[1] if @_ > 1; # cast to boolean
+   $_[0]{virtual_inodes}
 }
-
-sub virtual_inodes($self) { $self->{virtual_inodes} }
 
 =head1 METHODS
 

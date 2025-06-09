@@ -1,9 +1,24 @@
 package Sys::Export::ELF;
+
+# ABSTRACT: Unpack various data structures of an ELF binary
+# VERSION
+
+=head1 DESCRIPTION
+
+This module is a minimalist approach to parsing ELF files.  You read or memory-map the file,
+then call C<unpack> on the bytes to get a data structure describing the most useful bits of
+the file, such as the libraries it depends on, or its dynamic-linking interpreter.
+
+This module is careful to not make copies of that input scalar, so you can pass a memory-mapped
+file (via L<File::Map>) and actually avoid mapping the whole file.
+
+=cut
+
 use v5.36;
 use Carp;
 use Scalar::Util 'dualvar';
 
-sub make_enum {
+sub _make_enum {
    my $i= 0;
    map +(defined? dualvar($i++, $_) : undef), @_;
 }
@@ -34,7 +49,7 @@ our @segment_header_packstr= (
    'V V Q< Q< Q< Q< Q< Q<',
    'N N Q> Q> Q> Q> Q> Q>',
 );
-our @segment_header_type= make_enum qw( NULL LOAD DYNAMIC INTERP NOTE SHLIB PHDR TLS );
+our @segment_header_type= _make_enum qw( NULL LOAD DYNAMIC INTERP NOTE SHLIB PHDR TLS );
 
 our @section_header_len= ( 40, 40, 64, 64 );
 our @section_header_fields= qw( name type flags addr offset size link info align entry_size );
@@ -53,7 +68,7 @@ our @dynamic_link_entry_packstr= (
    'Q< Q<',
    'Q> Q>',
 );
-our @dynamic_link_entry_tag= make_enum qw( NULL NEEDED PLTRELSZ PLTGOT HASH STRTAB SYMTAB RELA
+our @dynamic_link_entry_tag= _make_enum qw( NULL NEEDED PLTRELSZ PLTGOT HASH STRTAB SYMTAB RELA
    RELASZ RELAENT STRSZ SYMENT INIT FINI SONAME RPATH SYMBOLIC REL RELSZ RELENT PLTREL DEBUG
    TEXTREL JMPREL BIND_NOW INIT_ARRAY FINI_ARRAY INIT_ARRAYSZ FINI_ARRAYSZ RUNPATH FLAGS
    ENCODING PREINIT_ARRAY PREINIT_ARRAYSZ SYMTAB_SHNDX RELRSZ RELR RELRENT NUM );
@@ -92,6 +107,22 @@ sub _strz_from_offset {
    pos $_[0] = $_[1];
    $_[0] =~ /\G([^\0]*)/? $1 : undef;
 }
+
+=head1 EXPORTS
+
+=head2 unpack
+
+  my $elf_info= unpack($elf_file_bytes);
+  # {
+  #    segments            => [ ... ],
+  #    sections            => [ ... ],
+  #    string_table_offset => $ofs,
+  #    dynamic             => [ ... ],  # dynamic link table entries
+  #    needed_libraries    => [ ... ],
+  #    interpreter         => $path,
+  # }
+
+=cut
 
 sub unpack {
    my %elf;
@@ -172,7 +203,7 @@ sub unpack {
 
             push @dynamic_entries, \%dynamic;
             if ($dynamic{tag} eq 'STRTAB') {
-               defined $elf{string_table}
+               defined $elf{string_table_offset}
                   and croak "Found multiple STRTAB?";
                $elf{string_table_offset}= $dynamic{val};
             }

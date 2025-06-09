@@ -23,6 +23,8 @@ This object contains the logic for exporting unix-style systems.
 
 =head1 CONSTRUCTOR
 
+=head2 new
+
   Sys::Export::Unix->new(\%attributes); # hashref
   Sys::Export::Unix->new(%attributes);  # key/value list
 
@@ -87,6 +89,8 @@ This can either be a Log::Any instance, or a string specifying a log level such 
 or "trace".  The default logging is on STDOUT (level 'info') and simply lists the files being
 copied and whether they were patched.
 
+=back
+
 =cut
 
 use v5.36;
@@ -130,51 +134,15 @@ sub new {
       $tmp;
    };
 
-   $attrs{log} //= 'info';
-   
-   my $rewrites= delete $attrs{rewrite_paths};
-
    my $self= bless \%attrs, $class;
-   $self->_build_log_fn;
-   if ($rewrites) {
+
+   $self->_build_log_fn($self->{log} //= 'info');
+
+   if (my $rewrites= delete $self->{rewrite_paths}) {
       $self->rewrite_path($_ => $rewrites->{$_})
          for keys %$rewrites;
    }
    return $self;
-}
-
-# This is a silly approximation of Log::Any to avoid having that as a dependency
-our %LOG_LEVELS = (
-   EMERGENCY => 0,
-   ALERT     => 1,
-   CRITICAL  => 2,
-   ERROR     => 3,
-   WARNING   => 4,
-   NOTICE    => 5,
-   INFO      => 6,
-   DEBUG     => 7,
-   TRACE     => 8,
-);
-sub _build_log_fn($self) {
-   my $dest= $self->{log};
-   if (ref $dest && $dest->can('info')) {
-      $self->{_log_info}=  $dest->is_info?  sub { $dest->info(@_) }  : undef;
-      $self->{_log_debug}= $dest->is_debug? sub { $dest->debug(@_) } : undef;
-      $self->{_log_trace}= $dest->is_trace? sub { $dest->trace(@_) } : undef;
-   } elsif (my $i_lev= $LOG_LEVELS{uc $dest}) {
-      $self->{_log_info}=  $LOG_LEVELS{INFO}  <= $i_lev? sub { say @_ } : undef;
-      $self->{_log_debug}= $LOG_LEVELS{DEBUG} <= $i_lev? sub { say @_ } : undef;
-      $self->{_log_trace}= $LOG_LEVELS{TRACE} <= $i_lev? sub { say @_ } : undef;
-   } else {
-      croak "Log '$dest' is not a Log::Any instance or known log level";
-   }
-}
-
-sub _log_action($self, $verb, $src, $dst, @notes) {
-   if ($self->{_log_info}) {
-      $self->{_log_info}->(sprintf "%3s %-20s -> %s", $verb, $src, $dst);
-      $self->{_log_info}->(sprintf "     %s", $_) for @notes;
-   }
 }
 
 =head1 ATTRIBUTES
@@ -262,6 +230,56 @@ sub _elf_interpreters($self) { $self->{elf_interpreters} //= {} }
 
 sub DESTROY($self, @) {
    $self->finish if $self->{_delayed_apply_stat};
+}
+
+=head2 log
+
+  $exporter->log('info');
+  $exporter->log($logger);
+
+Set the logging output object, or log level for 'print' output.
+
+=cut
+
+sub log {
+   if (@_ > 1) {
+      $_[0]->_build_log_fn($_[1]);
+      $_[0]{log}= $_[1];
+   }
+   $_[0]{log}
+}
+
+# This is a silly approximation of Log::Any to avoid having that as a dependency
+our %LOG_LEVELS = (
+   EMERGENCY => 0,
+   ALERT     => 1,
+   CRITICAL  => 2,
+   ERROR     => 3,
+   WARNING   => 4,
+   NOTICE    => 5,
+   INFO      => 6,
+   DEBUG     => 7,
+   TRACE     => 8,
+);
+sub _build_log_fn($self, $dest) {
+   if (ref $dest && $dest->can('info')) {
+      $self->{_log_info}=  $dest->is_info?  sub { $dest->info(@_) }  : undef;
+      $self->{_log_debug}= $dest->is_debug? sub { $dest->debug(@_) } : undef;
+      $self->{_log_trace}= $dest->is_trace? sub { $dest->trace(@_) } : undef;
+   } elsif (my $i_lev= $LOG_LEVELS{uc $dest}) {
+      $self->{_log_info}=  $LOG_LEVELS{INFO}  <= $i_lev? sub { say @_ } : undef;
+      $self->{_log_debug}= $LOG_LEVELS{DEBUG} <= $i_lev? sub { say @_ } : undef;
+      $self->{_log_trace}= $LOG_LEVELS{TRACE} <= $i_lev? sub { say @_ } : undef;
+   } else {
+      croak "Log '$dest' is not a Log::Any instance or known log level";
+   }
+}
+
+sub _log_action($self, $verb, $src, $dst, @notes) {
+   if ($self->{_log_info}) {
+      $self->{_log_info}->(sprintf "%3s %-20s -> %s", $verb, $src, $dst);
+      $self->{_log_info}->(sprintf "     %s", $_) for @notes;
+   }
 }
 
 =head1 METHODS
