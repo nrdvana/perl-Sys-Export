@@ -544,20 +544,25 @@ sub _export_elf_file($self, $file, $notes) {
          $interpreter= $elf->{interpreter};
          push @{$self->{add}}, $interpreter;
       }
+      warn "  interpreter = $interpreter, libs = @libs, has_rewrites = ".$self->_has_rewrites." src_path=$file->{src_path}\n";
    }
    # Is any path rewriting requested?
    if ($self->_has_rewrites && length $file->{src_path} && defined $interpreter) {
       # If any dep gets its path rewritten, need to modify interpreter and/or rpath
       my $rre= $self->path_rewrite_regex;
       if (grep m/^$rre/, $interpreter, @libs) {
-         $interpreter= $self->get_dst_for_src($interpreter);
+         # the interpreter and rpath need to be absolute URLs, but within the logical root
+         # of 'dst'.  They're already relative to 'dst', so just prefix a slash.
+         $interpreter= '/'.$self->get_dst_for_src($interpreter);
          my %rpath;
          for (@libs) {
             my $dst_lib= $self->get_dst_for_src($_);
-            $dst_lib =~ s,[^/]+$,,; # path
+            $dst_lib =~ s,[^/]+$,,; # path of lib
             $rpath{$dst_lib}= 1;
          }
-         my $rpath= join ':', keys %rpath;
+         my $rpath= join ':', map "/$_", keys %rpath;
+         warn "  interpreter = $interpreter, rpath = $rpath\n";
+         
          # Create a temporary file so we can run patchelf on it
          my $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
          _syswrite_all($tmp, \$file->{data});
@@ -808,18 +813,18 @@ sub _system_mknod($path, $mode, $dev) {
 sub _capture_cmd {
    require IPC::Open3;
    require Symbol;
-   my $pid= open3(undef, my $out_fh, my $err_fh= Symbol::gensym(), @_)
+   my $pid= IPC::Open3::open3(undef, my $out_fh, my $err_fh= Symbol::gensym(), @_)
       or die "running @_ failed";
    waitpid($pid, 0);
    my $wstat= $?;
    local $/= undef;
    my $out= <$out_fh>;
-   my $err= <$out_fh>;
+   my $err= <$err_fh>;
    return ($out, $err, $wstat);
 }
 
 our $patchelf;
-sub _patchelf($self, $path, %attrs) {
+sub _patchelf($path, %attrs) {
    unless ($patchelf) {
       chomp($patchelf= `which patchelf`);
       croak "Missing tool 'patchelf'"
