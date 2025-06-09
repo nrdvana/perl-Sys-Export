@@ -11,7 +11,15 @@ our $have_unix_mknod= eval { require Unix::Mknod; };
 =head1 SYNOPSIS
 
   use Sys::Export::Unix;
-  my $exporter= Sys::Export::Unix->new(src => '/', dst => '/initrd');
+  my $exporter= Sys::Export::Unix->new(
+    src => '/', dst => '/initrd'
+    rewrite_paths => {
+      'sbin'     => 'bin',
+      'usr/bin'  => 'bin',
+      'usr/sbin' => 'bin',
+      'usr/lib'  => 'lib',
+    },
+  );
   $exporter->add('bin/busybox');
 
 =head1 DESCRIPTION
@@ -48,6 +56,10 @@ directly into a CPIO archive:
 Options:
 
 =over
+
+=item rewrite_paths
+
+Convenience for calling L</rewrite_path> using a hashref of C<< { src => dst } >> pairs.
 
 =item tmp
 
@@ -115,9 +127,15 @@ sub new {
    };
 
    $attrs{log} //= 'info';
+   
+   my $rewrites= delete $attrs{rewrite_paths};
 
    my $self= bless \%attrs, $class;
    $self->_build_log_fn;
+   if ($rewrites) {
+      $self->rewrite_path($_ => $rewrites->{$_})
+         for keys %$rewrites;
+   }
    return $self;
 }
 
@@ -318,8 +336,8 @@ sub _src_abs_path($self, $path) {
 
 =head2 add
 
-  $exporter->add($src_path);
-  $exporter->add(\%file_attrs);
+  $exporter->add($src_path, ...);
+  $exporter->add(\%file_attrs, ...);
 
 Add a source path (logically absolute with respect to C</src>) to the export.  This immediately
 copies the file to the destination, possibly rewriting paths within it, and then triggering a
@@ -347,6 +365,8 @@ If specified directly, file attributes are:
 
 If you don't specify src_path, path rewrites will not be applied to the contents of the file or
 symlink (on the assumption that you used paths relative to the destination).
+
+Returns C<$exporter> for chaining.
 
 =cut
 
