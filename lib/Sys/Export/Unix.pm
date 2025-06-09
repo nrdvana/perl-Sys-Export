@@ -74,6 +74,12 @@ written to it:
     # dst_path is relative to $exporter->dst
     # content_ref is a scalar ref with the new contents of the file, possibly rewritten
 
+=item log
+
+This can either be a Log::Any instance, or a string specifying a log level such as "debug"
+or "trace".  The default logging is on STDOUT (level 'info') and simply lists the files being
+copied and whether they were patched.
+
 =cut
 
 sub new {
@@ -108,14 +114,53 @@ sub new {
       $tmp;
    };
 
-   bless \%attrs, $class;
+   $attrs{log} //= 'info';
+
+   my $self= bless \%attrs, $class;
+   $self->_build_log_fn;
+   return $self;
+}
+
+# This is a silly approximation of Log::Any to avoid having that as a dependency
+our %LOG_LEVELS = (
+   EMERGENCY => 0,
+   ALERT     => 1,
+   CRITICAL  => 2,
+   ERROR     => 3,
+   WARNING   => 4,
+   NOTICE    => 5,
+   INFO      => 6,
+   DEBUG     => 7,
+   TRACE     => 8,
+);
+sub _build_log_fn($self) {
+   my $dest= $self->{log};
+   if (ref $dest && $dest->can('info')) {
+      $self->{_log_info}=  $dest->is_info?  sub { $dest->info(@_) }  : undef;
+      $self->{_log_debug}= $dest->is_debug? sub { $dest->debug(@_) } : undef;
+      $self->{_log_trace}= $dest->is_trace? sub { $dest->trace(@_) } : undef;
+   } elsif (my $i_lev= $LOG_LEVELS{uc $dest}) {
+      $self->{_log_info}=  $LOG_LEVELS{INFO}  <= $i_lev? sub { say @_ } : undef;
+      $self->{_log_debug}= $LOG_LEVELS{DEBUG} <= $i_lev? sub { say @_ } : undef;
+      $self->{_log_trace}= $LOG_LEVELS{TRACE} <= $i_lev? sub { say @_ } : undef;
+   } else {
+      croak "Log '$dest' is not a Log::Any instance or known log level";
+   }
+}
+
+sub _log_action($self, $verb, $src, $dst, @notes) {
+   if ($self->{_log_info}) {
+      $self->{_log_info}->(sprintf "%3s %-20s -> %s", $verb, $src, $dst);
+      $self->{_log_info}->(sprintf "     %s", $_) for @notes;
+   }
 }
 
 =head1 ATTRIBUTES
 
 =head2 src
 
-The root of the source filesystem.
+The root of the source filesystem.  It must be the actual root used by the symlinks and library
+paths inside this filesystem, or things will break.
 
 =head2 src_abs
 
@@ -124,7 +169,9 @@ The C<abs_path> of the root of the source filesystem, always ending with '/'.
 =head2 dst
 
 The root of the destination filesystem, OR a coderef which receives files which are ready to be
-recorded.
+recorded.  This must be the logical root of your destination filesystem, which will be used when
+symlinks or library paths refer to '/'.  If you want to move files into a subdirectory of the
+logical destination filesystem, see L</rewrite_path>.
 
 =head2 dst_abs
 
@@ -134,11 +181,14 @@ Only defined if L<dst> is not a coderef.
 =head2 tmp
 
 The C<abs_path> of a directory to use for temporary staging before renaming into L</dst>.
+This must be in the same volume as C<dst> so that C<rename()> can be used to move temporary
+files into their C<dst> location.
 
 =head2 src_path_set
 
 A hashref of all source paths which have been processed, and which destination path they were
-written as.  All paths relative, without a leading slash.
+written as.  All paths are logically absolute to their respective roots, but without a leading
+slash.
 
 =head2 dst_path_set
 
@@ -198,21 +248,25 @@ sub DESTROY($self, @) {
 
   $exporter->rewrite_path($src_prefix, $dst_prefix);
 
-Add a path rewrite rule which replaces occurrences of $src_prefix with $dst_prefix.
-Only one rewrite occurs per path; they don't cascade.  Paths must be absolute starting with '/'.
+Add a path rewrite rule which replaces occurrences of C<$src_prefix> with C<$dst_prefix>.
+Only one rewrite occurs per path; they don't cascade.  Path prefixes refer to the logical
+absolute path with the source root and destination root.  You may specify these prefixes
+with or without the leading implied '/'.
+
+Returns C<$exporter> for chaining.
 
 =cut
 
 sub rewrite_path($self, $orig, $new) {
    my $rw= ($self->{path_rewrite_map} //= {});
-   croak "Conflicting rewrite supplied for '$orig'"
-      if exists $rw->{$orig} && $rw->{$orig} ne $new;
    $orig =~ s,^/,,;
    $new =~ s,^/,,;
    $orig !~ m,^[.]+/, && $new !~ m,^[.]+/,
-      or croak "Paths for rewrite_path must be absolute ($orig => $new)";
+      or croak "Paths for rewrite_path must be logically absolute ($orig => $new)";
+   croak "Conflicting rewrite supplied for '$orig'"
+      if exists $rw->{$orig} && $rw->{$orig} ne $new;
    $rw->{$orig}= $new;
-   delete $self->{path_rewrite_regex};
+   delete $self->{path_rewrite_regex}; # lazy-built
    $self;
 }
 
@@ -228,13 +282,12 @@ sub _has_rewrites($self) {
 #   * it resolves more than 256 symlinks
 #   * readlink fails
 # Un-intuitively, this returns a string without a leading '/' because that's what I need below.
-sub _chroot_abs_path($root, $path) {
+sub _chroot_abs_path($self, $root, $path) {
    my @base= split '/', $root;
    my @abs= @base;
    my @parts= grep length && $_ ne '.', split '/', $path;
    my $lim= 256;
    while (@parts) {
-      #use DDP; &p({ base => \@base, abs => \@abs, parts => \@parts });
       my $part= shift @parts;
       my $abs= join '/', @abs, $part;
       my (undef, undef, $mode)= lstat $abs
@@ -253,11 +306,14 @@ sub _chroot_abs_path($root, $path) {
          push @abs, $part;
       }
    }
-   return join '/', @abs[scalar @base .. $#abs];
+   my $abs= join '/', @abs[scalar @base .. $#abs];
+   $self->{log_trace}->("Absolute path of '$path' within root '$root' is '$abs'")
+      if $self->{log_trace} && $abs ne $path;
+   return $abs;
 }
 
 sub _src_abs_path($self, $path) {
-   _chroot_abs_path($self->{src_abs}, $path);
+   $self->_chroot_abs_path($self->{src_abs}, $path);
 }
 
 =head2 add
@@ -265,14 +321,14 @@ sub _src_abs_path($self, $path) {
   $exporter->add($src_path);
   $exporter->add(\%file_attrs);
 
-Add a source path to the export.  This immediately copies the file to the destination, possibly
-rewriting paths within it, and then triggering a copy of any libraries or interpreters it
-depends on.
+Add a source path (logically absolute with respect to C</src>) to the export.  This immediately
+copies the file to the destination, possibly rewriting paths within it, and then triggering a
+copy of any libraries or interpreters it depends on.
 
 If specified directly, file attributes are:
 
-  name            # relative destination path
-  src_path        # relative source path
+  name            # destination path relative to destination root
+  src_path        # source path relative to source root, no leading '/'
   data            # literal data content of file (must be bytes, not unicode)
   data_path       # absolute path of file to load 'data' from
   dev             # device, from stat
@@ -294,11 +350,6 @@ symlink (on the assumption that you used paths relative to the destination).
 
 =cut
 
-sub _log_action($self, $verb, $src, $dst, @notes) {
-   printf "%3s %-20s -> %s\n", $verb, $src, $dst;
-   printf "     %s\n", $_ for @notes;
-}
-
 sub add {
    my $self= shift;
    my $add= ($self->{add} //= []);
@@ -307,9 +358,13 @@ sub add {
       my $next= shift @$add;
       my %file;
       if (ref $next eq 'HASH') {
+         $self->{_log_debug}->("Exporting @{[ $next->{src_path}//'' ]} to $next->{name}")
+            if $self->{_log_debug};
          %file= %$next;
       } else {
          $next =~ s,^/,,;
+         $self->{_log_debug}->("Exporting $next")
+            if $self->{_log_debug};
          @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$next)
             or croak "lstat '$self->{src_abs}$next': $!";
          # If $next is itself a symlink, we want to export this name, and also the thing
@@ -321,16 +376,21 @@ sub add {
                if length $parent;
             # add this symlink target to the paths to be exported
             my $target= readlink($self->{src_abs}.$next);
-            $target= $parent . $target unless $target =~ m,^/,;
-            unshift @$add, $target;
+            my $full_target= $target =~ m,^/,? $target : $parent . $target;
+            $self->{_log_debug}->("Symlink to '$target', queueing '$full_target'") if $self->{_log_debug};
+            unshift @$add, $full_target;
          } else {
             # Resolve symlinks within src/ to get the true identity of this file
             my $abs= $self->_src_abs_path($next);
             defined $abs or croak "Can't resolve absolute path of '$next'";
+            $self->{_log_debug}->("Resolved to '$abs'") if $self->{_log_debug} && $abs ne $next;
             $next= $abs;
          }
          # ignore repeat requests
-         next if exists $self->{src_path_set}{$next};
+         if (exists $self->{src_path_set}{$next}) {
+            $self->{_log_debug}->("  (already exported '$next')") if $self->{_log_debug};
+            next;
+         }
          $file{src_path}= $next;
          $file{data_path}= $self->{src_abs} . $next;
          $file{name}= $self->get_dst_for_src($next);
@@ -342,8 +402,10 @@ sub add {
          if (!$self->on_collision) {
             croak "Already wrote a file '$file{name}'".(length $orig? " which came from $orig":"");
          } elsif ($self->on_collision eq 'ignore') {
+            $self->{_log_debug}->("Already exported to '$file{name}' previously from '$orig'") if $self->{_log_debug};
             next;
          } elsif ($self->on_collision eq 'overwrite') {
+            $self->{_log_debug}->("Overwriting '$file{name}'") if $self->{_log_debug};
             unlink $self->dst_abs . $file{name}
                if defined $self->dst_abs;
          } else {
@@ -421,7 +483,7 @@ sub skip($self, $path) {
 =head2 finish
 
 Apply any postponed changes to the destination filesystem.  For instance, this applies mtimes
-to directories since writing the contents to the directory would have changed the mtime.
+to directories since writing the contents of the directory would have changed the mtime.
 
 =cut
 
@@ -445,7 +507,10 @@ rewrite rules.  If no rewrites exist, this just returns C<$src_path>.
 
 sub get_dst_for_src($self, $path) {
    my $rre= $self->path_rewrite_regex;
-   return scalar($path =~ s/^$rre/$self->{path_rewrite_map}{$1}/er);
+   my $rewrote= $path =~ s/^$rre/$self->{path_rewrite_map}{$1}/er;
+   $self->{_log_trace}->("  rewrote '$path' to '$rewrote'")
+      if $self->{_log_trace} && $path ne $rewrote;
+   return $rewrote;
 }
 
 sub _syswrite_all($tmp, $content_ref) {
@@ -464,6 +529,8 @@ sub _export_file($self, $file) {
    # If the file has a link count > 1, check to see if we already have it in the destination
    if ($file->{nlink} > 1) {
       if (my $already= $self->_link_map->{"$file->{dev}:$file->{ino}"}) {
+         $self->{_log_debug}->("Already exported inode $file->{dev}:$file->{ino} as '$already'")
+            if $self->{_log_debug};
          # Yep, make a link of that file instead of copying again
          $self->_log_action("LNK", $already, $file->{name});
          if (ref $self->dst eq 'CODE') { # CPIO stream
@@ -521,7 +588,10 @@ sub _resolve_src_library($self, $libname, $rpath) {
    for my $path (@paths) {
       $path =~ s,^/,,; # remove leading slash because src_abs ends with slash
       $path =~ s,(?<=[^/])\z,/, if length $path; # add trailing slash if it isn't the root
-      return $path . $libname if -e $self->{src_abs} . $path . $libname;
+      if (-e $self->{src_abs} . $path . $libname) {
+         $self->{_log_trace}->("  found $libname at $path$libname") if $self->{_log_trace};
+         return $path . $libname;
+      }
    }
    return ();
 }
@@ -531,6 +601,8 @@ sub _export_elf_file($self, $file, $notes) {
    my $elf= Sys::Export::ELF::unpack($file->{data});
    my ($interpreter, @libs);
    if ($elf->{dynamic}) {
+      $self->{_log_debug}->("Dynamic-linked ELF file: '$file->{name}' (src_path=$file->{src_path})")
+         if $self->{_log_debug};
       if ($elf->{needed_libraries}) {
          for (@{$elf->{needed_libraries}}) {
             my $lib= $self->_resolve_src_library($_, $elf->{rpath}) // carp("Can't find lib $_ needed for $file->{src_path}");
@@ -544,7 +616,8 @@ sub _export_elf_file($self, $file, $notes) {
          $interpreter= $elf->{interpreter};
          push @{$self->{add}}, $interpreter;
       }
-      warn "  interpreter = $interpreter, libs = @libs, has_rewrites = ".$self->_has_rewrites." src_path=$file->{src_path}\n";
+      $self->{_log_debug}->("  interpreter = ".($interpreter//'').", libs = @libs")
+         if $self->{_log_debug};
    }
    # Is any path rewriting requested?
    if ($self->_has_rewrites && length $file->{src_path} && defined $interpreter) {
@@ -561,16 +634,20 @@ sub _export_elf_file($self, $file, $notes) {
             $rpath{$dst_lib}= 1;
          }
          my $rpath= join ':', map "/$_", keys %rpath;
-         warn "  interpreter = $interpreter, rpath = $rpath\n";
-         
+         $self->{_log_debug}->("  rewritten interpreter = $interpreter, rpath = $rpath")
+            if $self->{_log_debug};
+
          # Create a temporary file so we can run patchelf on it
          my $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
          _syswrite_all($tmp, \$file->{data});
-         _patchelf($tmp, '--set-interpreter' => $interpreter,
-            length $rpath? ('--set-rpath' => $rpath) : ());
+         my @patchelf= ( '--set-interpreter' => $interpreter );
+         push @patchelf, ( '--set-rpath' => $rpath ) if length $rpath;
+         $self->_patchelf($tmp, @patchelf);
          delete $file->{data};
          $file->{data_path}= $tmp;
          push @$notes, '+patchelf';
+      } else {
+         $self->{_log_debug}->("  no interpreter/lib paths affected by rewrites") if $self->{_log_debug};
       }
    }
 }
@@ -824,13 +901,14 @@ sub _capture_cmd {
 }
 
 our $patchelf;
-sub _patchelf($path, %attrs) {
+sub _patchelf($self, $path, @args) {
+   $self->{_log_trace}->("  patchelf @args $path") if $self->{_log_trace};
    unless ($patchelf) {
       chomp($patchelf= `which patchelf`);
       croak "Missing tool 'patchelf'"
          unless $patchelf;
    }
-   my ($out, $err, $wstat)= _capture_cmd($patchelf, %attrs, $path);
+   my ($out, $err, $wstat)= _capture_cmd($patchelf, @args, $path);
    $wstat == 0
       or croak "patchelf '$path' failed: $err";
    1;
