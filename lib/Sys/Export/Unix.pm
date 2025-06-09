@@ -517,9 +517,11 @@ sub _export_file($self, $file) {
 }
 
 sub _resolve_src_library($self, $libname, $rpath) {
-   my @paths= (length $rpath? (grep length, split /:/, $rpath) : (), qw( lib lib64 usr/lib usr/lib64 ));
+   my @paths= ((grep length, split /:/, ($rpath//'')), qw( lib lib64 usr/lib usr/lib64 ));
    for my $path (@paths) {
-      return "$path/$libname" if -e "$path/$libname";
+      $path =~ s,^/,,; # remove leading slash because src_abs ends with slash
+      $path =~ s,(?<=[^/])\z,/, if length $path; # add trailing slash if it isn't the root
+      return $path . $libname if -e $self->{src_abs} . $path . $libname;
    }
    return ();
 }
@@ -531,12 +533,13 @@ sub _export_elf_file($self, $file, $notes) {
    if ($elf->{dynamic}) {
       if ($elf->{needed_libraries}) {
          for (@{$elf->{needed_libraries}}) {
-            my $lib= $self->_resolve_src_library($_, $elf->{rpath}) // carp("Can't find lib $_ needed for $file");
+            my $lib= $self->_resolve_src_library($_, $elf->{rpath}) // carp("Can't find lib $_ needed for $file->{src_path}");
             push @libs, $lib if $lib;
          }
          push @{$self->{add}}, @libs;
       }
-      if ($elf->{interpreter}) {
+      if (length $elf->{interpreter}) {
+         $elf->{interpreter} =~ s,^/,,;
          $self->_elf_interpreters->{$elf->{interpreter}}= 1;
          $interpreter= $elf->{interpreter};
          push @{$self->{add}}, $interpreter;
