@@ -4,6 +4,7 @@ use Carp;
 use Cwd 'abs_path';
 use Fcntl qw( S_ISREG S_ISDIR S_IFDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT );
 require File::Temp;
+require POSIX;
 our $have_file_map= eval { require File::Map; };
 our $have_unix_mknod= eval { require Unix::Mknod; };
 
@@ -173,8 +174,9 @@ A regex that matches the longest prefix of a source path having a rewrite rule.
 
 sub path_rewrite_regex($self) {
    $self->{path_rewrite_regex} //= do {
-      my $alt= join '|', map quotemeta, reverse sort keys %{$self->{path_rewrite_map} // {}};
-      length $alt? qr/($alt)/ : qr/(*FAIL)/;
+      my $rw= $self->{path_rewrite_map} // {};
+      !keys %$rw? qr/(*FAIL)/
+      : qr/(@{[ join '|', map quotemeta, reverse sort keys %{$self->{path_rewrite_map}} ]})/;
    };
 }
 
@@ -202,7 +204,7 @@ Only one rewrite occurs per path; they don't cascade.  Paths must be absolute st
 =cut
 
 sub rewrite_path($self, $orig, $new) {
-   my $rw= $self->{path_rewrite_map} //= {};
+   my $rw= ($self->{path_rewrite_map} //= {});
    croak "Conflicting rewrite supplied for '$orig'"
       if exists $rw->{$orig} && $rw->{$orig} ne $new;
    $orig =~ s,^/,,;
