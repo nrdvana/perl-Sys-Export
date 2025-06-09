@@ -1,12 +1,7 @@
 package Sys::Export::Unix;
-use v5.36;
-use Carp;
-use Cwd 'abs_path';
-use Fcntl qw( S_ISREG S_ISDIR S_IFDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT );
-require File::Temp;
-require POSIX;
-our $have_file_map= eval { require File::Map; };
-our $have_unix_mknod= eval { require Unix::Mknod; };
+
+# ABSTRACT: Export subsets of a UNIX system
+# VERSION
 
 =head1 SYNOPSIS
 
@@ -93,6 +88,15 @@ or "trace".  The default logging is on STDOUT (level 'info') and simply lists th
 copied and whether they were patched.
 
 =cut
+
+use v5.36;
+use Carp;
+use Cwd 'abs_path';
+use Fcntl qw( S_ISREG S_ISDIR S_IFDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT );
+require File::Temp;
+require POSIX;
+our $have_file_map= eval { require File::Map; };
+our $have_unix_mknod= eval { require Unix::Mknod; };
 
 sub new {
    my $class= shift;

@@ -24,11 +24,19 @@ if ($ENV{DOCKER_TEST_IMAGE_NAME}) {
 } else {
    mkfile("$tmp/entrypoint.sh", <<~END, 0755);
    apk add perl patchelf
-   perl $tmp/export.pl
+   perl /export$tmp/export.pl
    END
    @cmd= ( 'alpine', "sh", "/export$tmp/entrypoint.sh" );
 }
 
+# This export is mapping the $tmp as /export/$tmp within the container.
+# The paths are being rewritten from / to $tmp/initrd because we want to be able to execute
+# them as "$tmp/initrd/busybox" from outside of the container.  So, the --interpreter needs
+# to be "$tmp/initrd/lib/ld-musl-etc" instead of "/export/$tmp/initrd/lib/ld-musl-etc".
+# Also need to specify 'tmp' because the actual mount point occurs at "/export/$tmp" and
+# the constructor is only smart enough to check the device of "/export" before choosing tmp.
+mkdir "$tmp/tmp";
+mkdir "$tmp/initrd";
 my $gid= $(+0;
 mkfile("$tmp/export.pl", <<END_PL, 0755);
 #! /usr/bin/perl
@@ -42,14 +50,12 @@ use Sys::Export::Unix;
    \$exporter->add('bin/busybox');
 }
 END {
-   # make sure we can delete these files from outside docker
+   # This is running as root inside the container.
+   # Make sure we can delete these files from outside docker.
    system("chgrp -R $gid \$FindBin::Bin/initrd");
    system("chmod -R g+w \$FindBin::Bin/initrd");
 }
 END_PL
-
-mkdir "$tmp/tmp";
-mkdir "$tmp/initrd";
 
 # Launch docker with volume at identical path of $tmp
 is( system(qw( docker run --init --rm -w / ),
