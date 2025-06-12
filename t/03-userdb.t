@@ -120,13 +120,13 @@ subtest 'add_user and add_group methods' => sub {
    
    # Test add_user with name
    $db->add_user('testuser', uid => 1001, gid => 1001);
-   ok($db->user_exists('testuser'), 'user was added');
+   ok($db->user('testuser'), 'user was added');
    is($db->users->{testuser}->uid, 1001, 'user has correct uid');
    is($db->users->{testuser}->groups, {}, 'user starts with empty groups');
    
    # Test add_group with name
    $db->add_group('testgroup', gid => 1001);
-   ok($db->group_exists('testgroup'), 'group was added');
+   ok($db->group('testgroup'), 'group was added');
    is($db->groups->{testgroup}->gid, 1001, 'group has correct gid');
    
    # Test add_user with user object
@@ -138,7 +138,7 @@ subtest 'add_user and add_group methods' => sub {
    );
    
    $db->add_user($source_user);
-   ok($db->user_exists('cloneuser'), 'user object was cloned and added');
+   ok($db->user('cloneuser'), 'user object was cloned and added');
    is($db->users->{cloneuser}->uid, 1002, 'cloned user has correct uid');
    is($db->users->{cloneuser}->groups, { testgroup => 1 }, 'groups filtered to existing only');
    
@@ -150,7 +150,7 @@ subtest 'add_user and add_group methods' => sub {
    );
    
    $db->add_group($source_group);
-   ok($db->group_exists('clonegroup'), 'group object was cloned and added');
+   ok($db->group('clonegroup'), 'group object was cloned and added');
    is($db->groups->{clonegroup}->gid, 1003, 'cloned group has correct gid');
 };
 
@@ -163,10 +163,10 @@ subtest 'conflict detection' => sub {
    
    # Test name conflict error
    like(dies { $db->add_user('user1', uid => 1002, gid => 1002) },
-       qr/Username 'user1' already exists with different UID/, 'name conflict detected');
+       qr/Username 'user1' already exists/, 'name conflict detected');
    
    like(dies { $db->add_group('group1', gid => 1002) },
-       qr/Group name 'group1' already exists with different GID/, 'group name conflict detected');
+       qr/Group name 'group1' already exists/, 'group name conflict detected');
    
    # Test UID/GID conflict warning
    like(warning { $db->add_user('user2', uid => 1001, gid => 1002) },
@@ -182,17 +182,17 @@ subtest 'existence checking methods' => sub {
    $db->add_user('testuser', uid => 1001, gid => 1001);
    $db->add_group('testgroup', gid => 1002);
    
-   ok($db->user_exists('testuser'), 'user_exists returns true for existing user');
-   ok(!$db->user_exists('nonexistent'), 'user_exists returns false for non-existing user');
+   ok($db->user('testuser'), 'user returns true for existing user');
+   ok(!$db->user('nonexistent'), 'user returns false for non-existing user');
    
-   ok($db->group_exists('testgroup'), 'group_exists returns true for existing group');
-   ok(!$db->group_exists('nonexistent'), 'group_exists returns false for non-existing group');
+   ok($db->group('testgroup'), 'group returns true for existing group');
+   ok(!$db->group('nonexistent'), 'group returns false for non-existing group');
    
-   ok($db->uid_exists(1001), 'uid_exists returns true for existing uid');
-   ok(!$db->uid_exists(9999), 'uid_exists returns false for non-existing uid');
+   ok($db->user(1001), 'user returns true for existing uid');
+   ok(!$db->user(9999), 'user returns false for non-existing uid');
    
-   ok($db->gid_exists(1002), 'gid_exists returns true for existing gid');
-   ok(!$db->gid_exists(9999), 'gid_exists returns false for non-existing gid');
+   ok($db->group(1002), 'group returns true for existing gid');
+   ok(!$db->group(9999), 'group returns false for non-existing gid');
 };
 
 subtest 'clone method' => sub {
@@ -206,14 +206,14 @@ subtest 'clone method' => sub {
    isa_ok($cloned, 'Sys::Export::Unix::UserDB');
    
    # Verify it's a deep clone
-   ok($cloned->user_exists('testuser'), 'cloned db has user');
-   ok($cloned->group_exists('testgroup'), 'cloned db has group');
+   ok($cloned->user('testuser'), 'cloned db has user');
+   ok($cloned->group('testgroup'), 'cloned db has group');
    is($cloned->users->{testuser}->groups, { testgroup => 1 }, 'cloned user has groups');
    
    # Modify original and verify clone is unchanged
    $db->add_user('newuser', uid => 1002, gid => 1002);
-   ok($db->user_exists('newuser'), 'original has new user');
-   ok(!$cloned->user_exists('newuser'), 'clone does not have new user');
+   ok($db->user('newuser'), 'original has new user');
+   ok(!$cloned->user('newuser'), 'clone does not have new user');
 };
 
 subtest 'load from files' => sub {
@@ -252,16 +252,16 @@ subtest 'load from files' => sub {
    $db->load($test_dir);
    
    # Verify users loaded
-   ok($db->user_exists('root'), 'root user loaded');
-   ok($db->user_exists('testuser'), 'testuser loaded');
-   ok($db->user_exists('alice'), 'alice loaded');
+   ok($db->user('root'), 'root user loaded');
+   ok($db->user('testuser'), 'testuser loaded');
+   ok($db->user('alice'), 'alice loaded');
    
    is($db->users->{testuser}->uid, 1001, 'testuser has correct uid');
    is($db->users->{testuser}->home, '/home/testuser', 'testuser has correct home');
    
    # Verify groups loaded
-   ok($db->group_exists('root'), 'root group loaded');
-   ok($db->group_exists('testgroup'), 'testgroup loaded');
+   ok($db->group('root'), 'root group loaded');
+   ok($db->group('testgroup'), 'testgroup loaded');
    
    # Verify group membership
    is($db->users->{testuser}->groups, { testgroup => 1 }, 'testuser in testgroup');
@@ -362,9 +362,9 @@ subtest 'roundtrip load and save' => sub {
    my $db2 = Sys::Export::Unix::UserDB->new;
    $db2->load($save_dir);
    
-   ok($db2->user_exists('testuser'), 'roundtrip preserved testuser');
-   ok($db2->user_exists('alice'), 'roundtrip preserved alice');
-   ok($db2->group_exists('testgroup'), 'roundtrip preserved testgroup');
+   ok($db2->user('testuser'), 'roundtrip preserved testuser');
+   ok($db2->user('alice'), 'roundtrip preserved alice');
+   ok($db2->group('testgroup'), 'roundtrip preserved testgroup');
    
    is($db2->users->{testuser}->groups, { testgroup => 1 }, 'roundtrip preserved testuser groups');
    is($db2->users->{alice}->groups, { testgroup => 1, wheel => 1 }, 'roundtrip preserved alice groups');

@@ -7,6 +7,7 @@ use warnings;
 use Carp qw(croak carp);
 use File::Spec::Functions qw(catfile);
 use Storable qw(dclone);
+use Scalar::Util ();
 
 =head1 SYNOPSIS
 
@@ -20,6 +21,7 @@ use Storable qw(dclone);
   my $dest_db = Sys::Export::Unix::UserDB->new;
   
   # Add users and groups
+  $dest_db->add_user($source_db->user('root'));
   $dest_db->add_user('newuser', uid => 1001, gid => 1001);
   $dest_db->add_group('newgroup', gid => 1001);
   
@@ -57,7 +59,7 @@ A hashref of C<< username => $user_obj >>.
 
 =attribute uids
 
-A convenience hashref C<< uid => $first_user_obj_of_uid >>.
+A convenience hashref C<< uid => $first_user_obj_having_uid >>.
 
 =attribute groups
 
@@ -65,7 +67,7 @@ A hashref of C<< groupname => $group_obj >>.
 
 =attribute gids
 
-A convenience hashref C<< gid => $first_group_obj_of_gid >>.
+A convenience hashref C<< gid => $first_group_obj_having_gid >>.
 
 =cut
 
@@ -374,46 +376,28 @@ sub add_group($self, $name_or_obj, %attrs) {
    return $self;
 }
 
-=method user_exists
+=method user
 
-   my $bool = $userdb->user_exists($name);
+   my $user = $userdb->user($name_or_uid);
 
-Checks if a username exists.
+Returns a user by name or UID if it exists, C<undef> otherwise.
 
-=method group_exists
+=method group
 
-   my $bool = $userdb->group_exists($name);
+   my $group = $userdb->group($name_or_uid);
 
-Checks if a group name exists.
-
-=method uid_exists
-
-   my $bool = $userdb->uid_exists($uid);
-
-Checks if a UID exists.
-
-=method gid_exists
-
-   my $bool = $userdb->gid_exists($gid);
-
-Checks if a GID exists.
+Returns a group by name or GID if it exists, C<undef> otherwise.
 
 =cut
 
-sub user_exists($self, $name) {
-   return exists $self->{users}{$name};
+sub _looks_like_integer($x) { Scalar::Util::looks_like_number($x) && int($x) == $x }
+
+sub user($self, $spec) {
+   _looks_like_integer($spec)? $self->{uids}{$spec} : $self->{users}{$spec};
 }
 
-sub group_exists($self, $name) {
-   return exists $self->{groups}{$name};
-}
-
-sub uid_exists($self, $uid) {
-   return exists $self->{uids}{$uid};
-}
-
-sub gid_exists($self, $gid) {
-   return exists $self->{gids}{$gid};
+sub group($self, $spec) {
+   _looks_like_integer($spec)? $self->{gids}{$spec} : $self->{groups}{$spec};
 }
 
 # Private methods
@@ -423,23 +407,15 @@ sub _add_user_object($self, $user) {
    my $uid = $user->uid;
    
    # Check for name conflicts
-   if (exists $self->{users}{$name}) {
-      my $existing_uid = $self->{users}{$name}->uid;
-      if ($existing_uid != $uid) {
-         croak "Username '$name' already exists with different UID ($existing_uid vs $uid)";
-      }
-   }
+   croak "Username '$name' already exists"
+      if defined $self->{users}{$name};
    
    # Warn about UID conflicts
-   if (exists $self->{uids}{$uid}) {
-      my $existing_name = $self->{uids}{$uid}->name;
-      if ($existing_name ne $name) {
-         carp "UID $uid already exists for user '$existing_name', also adding for '$name'";
-      }
-   }
+   carp "UID $uid already exists for user '".$self->{uids}{$uid}->name."', now also used by '$name'"
+      if defined $self->{uids}{$uid};
    
    $self->{users}{$name} = $user;
-   $self->{uids}{$uid} = $user unless exists $self->{uids}{$uid};
+   $self->{uids}{$uid} //= $user;
 }
 
 sub _add_group_object($self, $group) {
@@ -447,23 +423,15 @@ sub _add_group_object($self, $group) {
    my $gid = $group->gid;
    
    # Check for name conflicts
-   if (exists $self->{groups}{$name}) {
-      my $existing_gid = $self->{groups}{$name}->gid;
-      if ($existing_gid != $gid) {
-         croak "Group name '$name' already exists with different GID ($existing_gid vs $gid)";
-      }
-   }
+   croak "Group name '$name' already exists"
+      if defined $self->{groups}{$name};
    
    # Warn about GID conflicts
-   if (exists $self->{gids}{$gid}) {
-      my $existing_name = $self->{gids}{$gid}->name;
-      if ($existing_name ne $name) {
-         carp "GID $gid already exists for group '$existing_name', also adding for '$name'";
-      }
-   }
+   carp "GID $gid already exists for group '".$self->{gids}{$gid}->name."', now also used by '$name'"
+      if defined $self->{gids}{$gid};
    
    $self->{groups}{$name} = $group;
-   $self->{gids}{$gid} = $group unless exists $self->{gids}{$gid};
+   $self->{gids}{$gid} //= $group;
 }
 
 sub _generate_file_contents($self) {
