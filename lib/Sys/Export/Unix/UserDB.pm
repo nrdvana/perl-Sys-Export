@@ -55,31 +55,25 @@ sub new($class, %args) {
 
 A hashref of C<< username => $user_obj >>.
 
-=cut
-
-sub users($self) { $self->{users} }
-
 =attribute uids
 
 A convenience hashref C<< uid => $first_user_obj_of_uid >>.
 
-=cut
-
-sub uids($self) { $self->{uids} }
-
 =attribute groups
 
 A hashref of C<< groupname => $group_obj >>.
-
-=cut
-
-sub groups($self) { $self->{groups} }
 
 =attribute gids
 
 A convenience hashref C<< gid => $first_group_obj_of_gid >>.
 
 =cut
+
+sub users($self) { $self->{users} }
+
+sub uids($self) { $self->{uids} }
+
+sub groups($self) { $self->{groups} }
 
 sub gids($self) { $self->{gids} }
 
@@ -129,7 +123,7 @@ sub load($self, $path) {
          gecos  => $gecos // '',
          home   => $home // '',
          shell  => $shell // '',
-         groups => [],
+         groups => {},
       );
       
       $self->_add_user_object($user);
@@ -206,6 +200,14 @@ If given a hashref, saves the file contents into scalars named 'passwd', 'group'
 
 =cut
 
+sub _mkfile($name, $data, $mode=undef) {
+   open my $fh, '>:raw', $name or croak "open(>$name): $!";
+   $fh->print($data) or croak "write($name): $!";
+   $fh->close or croak "close($name): $!";
+   chmod $mode, $name or croak "chmod($name, $mode): $!"
+      if defined $mode;
+}
+
 sub save($self, $target) {
    croak "Target is required" unless defined $target;
    
@@ -216,24 +218,9 @@ sub save($self, $target) {
       $target->{group} = $group_content;
       $target->{shadow} = $shadow_content;
    } else {
-      my $passwd_file = catfile($target, 'passwd');
-      my $group_file = catfile($target, 'group');
-      my $shadow_file = catfile($target, 'shadow');
-      
-      open my $passwd_fh, '>', $passwd_file 
-         or croak "Cannot write $passwd_file: $!";
-      print $passwd_fh $passwd_content;
-      close $passwd_fh;
-      
-      open my $group_fh, '>', $group_file 
-         or croak "Cannot write $group_file: $!";
-      print $group_fh $group_content;
-      close $group_fh;
-      
-      open my $shadow_fh, '>', $shadow_file 
-         or croak "Cannot write $shadow_file: $!";
-      print $shadow_fh $shadow_content;
-      close $shadow_fh;
+      _mkfile(catfile($target, 'passwd'), $passwd_content, 0755);
+      _mkfile(catfile($target, 'group'),  $group_content,  0755);
+      _mkfile(catfile($target, 'shadow'), $shadow_content, 0700);
    }
    
    return $self;
@@ -319,19 +306,14 @@ sub add_user($self, $name_or_obj, %attrs) {
       $name = $user->name;
       
       # Filter group membership to only include groups that exist in this UserDB
-      my @valid_groups;
-      for my $group_name (@{$user->groups}) {
-         if (exists $self->{groups}{$group_name}) {
-            push @valid_groups, $group_name;
-         }
-      }
-      $user->groups(\@valid_groups);
+      my %groups= $user->groups->%*;
+      exists $self->{groups}{$_} or delete $groups{$_}
+         for keys %groups;
+      $user->groups(\%groups);
       
       # Override any provided attributes
       for my $key (keys %attrs) {
-         if ($user->can($key)) {
-            $user->$key($attrs{$key});
-         }
+         $user->$key($attrs{$key}) if $user->can($key);
       }
    } else {
       # Create new user
@@ -339,18 +321,14 @@ sub add_user($self, $name_or_obj, %attrs) {
       croak "Username is required" unless defined $name;
       
       # Set defaults
-      unless (exists $attrs{uid}) {
-         my ($login, $passwd, $uid) = getpwnam($name);
-         $attrs{uid} = $uid if defined $uid;
-      }
-      
+      $attrs{uid} //= (getpwnam($name))[2];
       $attrs{name} = $name;
       $attrs{passwd} //= 'x';
       $attrs{gid} //= $attrs{uid} // 100;
       $attrs{gecos} //= '';
       $attrs{home} //= "/home/$name";
       $attrs{shell} //= '/bin/bash';
-      $attrs{groups} //= [];
+      $attrs{groups} //= {};
       
       $user = Sys::Export::Unix::UserDB::User->new(%attrs);
    }
@@ -378,15 +356,14 @@ sub add_group($self, $name_or_obj, %attrs) {
       
       # Override any provided attributes
       for my $key (keys %attrs) {
-         if ($group->can($key)) {
-            $group->$key($attrs{$key});
-         }
+         $group->$key($attrs{$key}) if $group->can($key);
       }
    } else {
       # Create new group
       $name = $name_or_obj;
       croak "Group name is required" unless defined $name;
-      
+
+      $attrs{gid} //= (getgrnam($name))[2];
       $attrs{name} = $name;
       $attrs{passwd} //= '';
       
@@ -403,35 +380,17 @@ sub add_group($self, $name_or_obj, %attrs) {
 
 Checks if a username exists.
 
-=cut
-
-sub user_exists($self, $name) {
-   return exists $self->{users}{$name};
-}
-
 =method group_exists
 
    my $bool = $userdb->group_exists($name);
 
 Checks if a group name exists.
 
-=cut
-
-sub group_exists($self, $name) {
-   return exists $self->{groups}{$name};
-}
-
 =method uid_exists
 
    my $bool = $userdb->uid_exists($uid);
 
 Checks if a UID exists.
-
-=cut
-
-sub uid_exists($self, $uid) {
-   return exists $self->{uids}{$uid};
-}
 
 =method gid_exists
 
@@ -440,6 +399,18 @@ sub uid_exists($self, $uid) {
 Checks if a GID exists.
 
 =cut
+
+sub user_exists($self, $name) {
+   return exists $self->{users}{$name};
+}
+
+sub group_exists($self, $name) {
+   return exists $self->{groups}{$name};
+}
+
+sub uid_exists($self, $uid) {
+   return exists $self->{uids}{$uid};
+}
 
 sub gid_exists($self, $gid) {
    return exists $self->{gids}{$gid};
@@ -502,24 +473,18 @@ sub _generate_file_contents($self) {
    
    # Generate passwd content
    for my $user (values %{$self->{users}}) {
-      $passwd_content .= sprintf "%s:%s:%d:%d:%s:%s:%s\n",
-         $user->name, $user->passwd, $user->uid, $user->gid,
+      $passwd_content .= sprintf "%s:x:%d:%d:%s:%s:%s\n",
+         $user->name, $user->uid, $user->gid,
          $user->gecos, $user->home, $user->shell;
    }
    
    # Generate group content
    for my $group (values %{$self->{groups}}) {
       # Collect members from users who have this group
-      my @members;
-      for my $user (values %{$self->{users}}) {
-         if (grep { $_ eq $group->name } @{$user->groups}) {
-            push @members, $user->name;
-         }
-      }
-      
-      my $members = join ',', @members;
+      my @members= map $_->name, grep $_->groups->{$group->name},
+         values $self->{users}->%*;
       $group_content .= sprintf "%s:%s:%d:%s\n",
-         $group->name, $group->passwd, $group->gid, $members;
+         $group->name, $group->passwd, $group->gid, join ',', sort @members;
    }
    
    # Generate shadow content
@@ -553,7 +518,7 @@ package Sys::Export::Unix::UserDB::User {
          gecos    => '',
          home     => '',
          shell    => '',
-         groups   => [],
+         groups   => {},
          # Shadow fields
          lastchg  => undef,
          min      => undef,
@@ -567,6 +532,10 @@ package Sys::Export::Unix::UserDB::User {
       for my $key (keys %attrs) {
          croak "Unknown user attribute: $key" unless exists $self->{$key};
          $self->{$key} = $attrs{$key};
+      }
+      # Coerce array of groups to hashref
+      if (ref $self->{groups} ne 'HASH') {
+         $self->{groups}= { map +($_ => 1), $self->{groups}->@* };
       }
       
       croak "User name is required" unless defined $self->{name};
@@ -632,18 +601,23 @@ package Sys::Export::Unix::UserDB::User {
       return $self->{expire};
    }
 
+   sub flag($self, $val = undef) {
+      $self->{flag} = $val if defined $val;
+      return $self->{flag};
+   }
+
    sub groups($self, $val = undef) {
       $self->{groups} = $val if defined $val;
       return $self->{groups};
    }
    
    sub add_group($self, $group_name) {
-      push @{$self->{groups}}, $group_name unless grep { $_ eq $group_name } @{$self->{groups}};
+      $self->{groups}{$group_name}= 1;
       return $self;
    }
    
    sub remove_group($self, $group_name) {
-      $self->{groups} = [grep { $_ ne $group_name } @{$self->{groups}}];
+      delete $self->{groups}{$group_name};
       return $self;
    }
    
@@ -656,7 +630,7 @@ package Sys::Export::Unix::UserDB::User {
          gecos    => $self->{gecos},
          home     => $self->{home},
          shell    => $self->{shell},
-         groups   => [@{$self->{groups}}],  # Clone the array
+         groups   => { $self->{groups}->%* },  # Clone the set
          lastchg  => $self->{lastchg},
          min      => $self->{min},
          max      => $self->{max},
@@ -675,7 +649,7 @@ package Sys::Export::Unix::UserDB::Group {
    sub new($class, %attrs) {
       my $self = {
          name   => undef,
-         passwd  => '',
+         passwd => '',
          gid    => undef,
       };
       

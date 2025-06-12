@@ -48,7 +48,7 @@ subtest 'user object creation and methods' => sub {
    is($user->gecos, 'Test User', 'gecos accessor works');
    is($user->home, '/home/testuser', 'home accessor works');
    is($user->shell, '/bin/bash', 'shell accessor works');
-   is($user->groups, ['wheel', 'users'], 'groups accessor works');
+   is($user->groups, { wheel => 1, users => 1 }, 'groups accessor works');
    
    # Test writable attributes
    $user->passwd('newpass');
@@ -59,19 +59,19 @@ subtest 'user object creation and methods' => sub {
    
    # Test group management
    $user->add_group('admin');
-   is($user->groups, ['wheel', 'users', 'admin'], 'add_group works');
+   is($user->groups, { wheel => 1, users => 1, admin => 1 }, 'add_group works');
    
    $user->add_group('wheel');  # duplicate
-   is($user->groups, ['wheel', 'users', 'admin'], 'add_group prevents duplicates');
+   is($user->groups, { wheel => 1, users => 1, admin => 1 }, 'add_group ignores duplicates');
    
    $user->remove_group('users');
-   is($user->groups, ['wheel', 'admin'], 'remove_group works');
+   is($user->groups, { wheel => 1, admin => 1 }, 'remove_group works');
    
    # Test clone
    my $cloned = $user->clone;
    isa_ok($cloned, 'Sys::Export::Unix::UserDB::User');
    is($cloned->name, 'testuser', 'clone preserves name');
-   is($cloned->groups, ['wheel', 'admin'], 'clone preserves groups');
+   is($cloned->groups, { wheel => 1, admin => 1 }, 'clone preserves groups');
    
    # Verify it's a deep clone
    $cloned->add_group('test');
@@ -122,7 +122,7 @@ subtest 'add_user and add_group methods' => sub {
    $db->add_user('testuser', uid => 1001, gid => 1001);
    ok($db->user_exists('testuser'), 'user was added');
    is($db->users->{testuser}->uid, 1001, 'user has correct uid');
-   is($db->users->{testuser}->groups, [], 'user starts with empty groups');
+   is($db->users->{testuser}->groups, {}, 'user starts with empty groups');
    
    # Test add_group with name
    $db->add_group('testgroup', gid => 1001);
@@ -140,7 +140,7 @@ subtest 'add_user and add_group methods' => sub {
    $db->add_user($source_user);
    ok($db->user_exists('cloneuser'), 'user object was cloned and added');
    is($db->users->{cloneuser}->uid, 1002, 'cloned user has correct uid');
-   is($db->users->{cloneuser}->groups, ['testgroup'], 'groups filtered to existing only');
+   is($db->users->{cloneuser}->groups, { testgroup => 1 }, 'groups filtered to existing only');
    
    # Test add_group with group object
    my $source_group = Sys::Export::Unix::UserDB::Group->new(
@@ -208,7 +208,7 @@ subtest 'clone method' => sub {
    # Verify it's a deep clone
    ok($cloned->user_exists('testuser'), 'cloned db has user');
    ok($cloned->group_exists('testgroup'), 'cloned db has group');
-   is($cloned->users->{testuser}->groups, ['testgroup'], 'cloned user has groups');
+   is($cloned->users->{testuser}->groups, { testgroup => 1 }, 'cloned user has groups');
    
    # Modify original and verify clone is unchanged
    $db->add_user('newuser', uid => 1002, gid => 1002);
@@ -264,8 +264,8 @@ subtest 'load from files' => sub {
    ok($db->group_exists('testgroup'), 'testgroup loaded');
    
    # Verify group membership
-   is($db->users->{testuser}->groups, ['testgroup'], 'testuser in testgroup');
-   is($db->users->{alice}->groups, ['testgroup', 'wheel'], 'alice in multiple groups');
+   is($db->users->{testuser}->groups, { testgroup => 1 }, 'testuser in testgroup');
+   is($db->users->{alice}->groups, { testgroup => 1, wheel => 1 }, 'alice in multiple groups');
    
    # Verify shadow data
    is($db->users->{testuser}->passwd, '$6$salt$hash', 'shadow password loaded');
@@ -301,7 +301,7 @@ subtest 'save to files' => sub {
    
    like($files{passwd}, qr/testuser:x:1001:1001:Test User:\/home\/testuser:\/bin\/bash/, 
        'passwd file contains testuser');
-   like($files{group}, qr/testgroup:.*:1001:testuser,alice/, 
+   like($files{group}, qr/testgroup:.*:1001:alice,testuser/,
        'group file contains membership');
    like($files{shadow}, qr/testuser:\$6\$salt\$hash:19000/, 
        'shadow file contains testuser');
@@ -319,7 +319,7 @@ subtest 'save to files' => sub {
    like($saved_passwd, qr/testuser:x:1001:1001/, 'saved passwd contains testuser');
    
    my $saved_group = slurp(catfile($save_dir, 'group'));
-   like($saved_group, qr/testgroup:.*:1001:testuser,alice/, 'saved group contains membership');
+   like($saved_group, qr/testgroup:.*:1001:alice,testuser/, 'saved group contains membership');
 };
 
 subtest 'roundtrip load and save' => sub {
@@ -366,8 +366,8 @@ subtest 'roundtrip load and save' => sub {
    ok($db2->user_exists('alice'), 'roundtrip preserved alice');
    ok($db2->group_exists('testgroup'), 'roundtrip preserved testgroup');
    
-   is($db2->users->{testuser}->groups, ['testgroup'], 'roundtrip preserved testuser groups');
-   is($db2->users->{alice}->groups, ['testgroup', 'wheel'], 'roundtrip preserved alice groups');
+   is($db2->users->{testuser}->groups, { testgroup => 1 }, 'roundtrip preserved testuser groups');
+   is($db2->users->{alice}->groups, { testgroup => 1, wheel => 1 }, 'roundtrip preserved alice groups');
    
    is($db2->users->{testuser}->passwd, '$6$salt$hash', 'roundtrip preserved shadow password');
    is($db2->users->{testuser}->lastchg, '19000', 'roundtrip preserved shadow data');
