@@ -7,6 +7,7 @@ use v5.36;
 use Fcntl qw( S_IFDIR S_IFMT );
 use Scalar::Util 'blessed';
 use Carp;
+our @CARP_NOT= qw( Sys::Export::Unix );
 require Sys::Export::Unix; # for _dev_major_minor 
 
 =head1 SYNOPSIS

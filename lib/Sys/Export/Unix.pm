@@ -42,11 +42,12 @@ The root of the exported system.  This directory must exist, and should be empty
 specify 'on_conflict'.
 
 It can also be a coderef, which avoids the entire construction of a staging directory, and
-doesn't require root permission to operate.  Your coderef could do something like write
-directly into a CPIO archive:
+doesn't require root permission to operate.  The arguments are the Export object and a hashref
+of file attributes the same as passed to L</add>:
 
-  my $cpio= Sys::Export::CPIO->new($filename);
-  my $exporter= Sys::Export->new(dst => sub { $cpio->append($_[1]) });
+  sub ($exporter, $file_attrs) { ... }
+
+It can also be an instance of L<Sys::Export::CPIO> which is coerced into a coderef for you.
 
 =back
 
@@ -96,8 +97,10 @@ copied and whether they were patched.
 use v5.36;
 use Carp;
 use Cwd 'abs_path';
-use Fcntl qw( S_ISREG S_ISDIR S_IFDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT );
+use Fcntl qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT 
+              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFMT );
 require File::Temp;
+require Scalar::Util;
 require POSIX;
 our $have_file_map= eval { require File::Map; };
 our $have_unix_mknod= eval { require Unix::Mknod; };
@@ -115,11 +118,17 @@ sub new {
 
    defined $attrs{dst} or croak "Require 'dst' attribute";
    unless (ref $attrs{dst} eq 'CODE') {
-      my $dst_abs= abs_path($attrs{dst} =~ s,(?<=[^/])$,/,r)
-         or croak "dst directory '$attrs{dst}' does not exist";
-      length $dst_abs > 1
-         or croak "cowardly refusing to export to '$dst_abs'";
-      $attrs{dst_abs}= "$dst_abs/";
+      if (ref $attrs{dst} && ref($attrs{dst})->isa('Sys::Export::CPIO')) {
+         my $cpio= $attrs{dst};
+         $attrs{dst}= sub($exporter, $file, @) { $cpio->append($file) };
+      }
+      else {
+         my $dst_abs= abs_path($attrs{dst} =~ s,(?<=[^/])$,/,r)
+            or croak "dst directory '$attrs{dst}' does not exist";
+         length $dst_abs > 1
+            or croak "cowardly refusing to export to '$dst_abs'";
+         $attrs{dst_abs}= "$dst_abs/";
+      }
    }
 
    $attrs{tmp} //= do {
@@ -161,12 +170,15 @@ The C<abs_path> of the root of the source filesystem, always ending with '/'.
 The root of the destination filesystem, OR a coderef which receives files which are ready to be
 recorded.  This must be the logical root of your destination filesystem, which will be used when
 symlinks or library paths refer to '/'.  If you want to move files into a subdirectory of the
-logical destination filesystem, see L</rewrite_path>.
+logical destination filesystem, see L</rewrite_path>.  If you provide a coderef, the signature
+is
+
+  sub ($exporter, $file_attrs) { ... }
 
 =head2 dst_abs
 
 The C<abs_path> of the root of the destination filesystem, always ending with '/'.
-Only defined if L<dst> is not a coderef.
+This is only defined if L<dst> is B<not> a coderef.
 
 =head2 tmp
 
@@ -403,6 +415,8 @@ sub add {
          $self->{_log_debug}->("Exporting @{[ $next->{src_path}//'' ]} to $next->{name}")
             if $self->{_log_debug};
          %file= %$next;
+      } elsif (ref $next eq 'ARRAY') {
+         %file= _attrs_from_array_notation(@$next);
       } else {
          $next =~ s,^/,,;
          $self->{_log_debug}->("Exporting $next")
@@ -493,7 +507,7 @@ sub add {
       }
       $self->{dst_path_set}{$file{name}}= $file{src_path};
 
-      my $mode= $file{mode};
+      my $mode= $file{mode} // croak "attribute 'mode' is required, for $file{name}";
       if (S_ISREG($mode)) { $self->_export_file(\%file) }
       elsif (S_ISDIR($mode)) { $self->_export_dir(\%file) }
       elsif (S_ISLNK($mode)) { $self->_export_symlink(\%file) }
@@ -505,6 +519,40 @@ sub add {
       }
    }
    $self;
+}
+
+our %_mode_alias= (
+   file => S_IFREG,
+   dir  => S_IFDIR,
+   sym  => S_IFLNK,
+   blk  => S_IFBLK,
+   chr  => S_IFCHR,
+   fifo => S_IFIFO,
+   sock => S_IFSOCK,
+);
+sub _looks_like_integer {
+   Scalar::Util::looks_like_number($_[0]) && int($_[0]) == $_[0];
+}
+sub _attrs_from_array_notation {
+   my ($mode, $owner, $name)= (shift, shift, shift);
+   unless (_looks_like_integer($mode)) {
+      $mode =~ /^(file|dir|sym|blk|chr|fifo|sock)(\d+)?\z/
+         or croak "Invalid mode '$mode': expected number, or prefix file/dir/sym/blk/chr/fifo/sock followed by octal permissions";
+      $mode= $_mode_alias{$1};
+      $mode |= oct($2 // ($mode == S_IFDIR? 0755 : 0644));
+   }
+   my %attrs= ( name => $name, mode => $mode );
+   my ($user,$group)= !defined $owner? (0,0) : split /:/, $owner;
+   $attrs{ _looks_like_integer($user)?  'uid' : 'user'  }= $user;
+   $attrs{ _looks_like_integer($group)? 'gid' : 'group' }= $group;
+   if (($mode & S_IFMT) == S_IFBLK || ($mode & S_IFMT) == S_IFCHR) {
+      @attrs{'major','minor'}= (shift, shift);
+   }
+   elsif (($mode & S_IFMT) == S_IFDIR) {
+      $attrs{data}= shift;
+   }
+   $attrs{nlink} //= 1;
+   return ( %attrs, @_ );
 }
 
 =head2 skip
