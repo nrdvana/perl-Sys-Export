@@ -17,25 +17,25 @@ subtest 'constructor and attributes' => sub {
    
    # Test constructor with initial values
    my $db2 = Sys::Export::Unix::UserDB->new(
-      users => { test => 'value' },
-      groups => { test => 'value' }
+      users => { test => { uid => 1, group => 'test' } },
+      groups => { test => { gid => 2 } },
    );
-   is($db2->users->{test}, 'value', 'constructor accepts initial users');
-   is($db2->groups->{test}, 'value', 'constructor accepts initial groups');
+   is($db2->users->{test}, object { call uid => 1; }, 'constructor accepts initial users');
+   is($db2->groups->{test}, object { call gid => 2; }, 'constructor accepts initial groups');
    
    # Test invalid attribute rejection
    like(dies { Sys::Export::Unix::UserDB->new(invalid => 'value') }, 
-       qr/Unknown attribute/, 'rejects unknown attributes');
+       qr/Unknown /, 'rejects unknown attributes');
 };
 
 subtest 'user object creation and methods' => sub {
    my $user = Sys::Export::Unix::UserDB::User->new(
       name => 'testuser',
       uid => 1001,
-      gid => 1001,
+      group => 'testuser',
       passwd => 'x',
       gecos => 'Test User',
-      home => '/home/testuser',
+      dir => '/home/testuser',
       shell => '/bin/bash',
       groups => ['wheel', 'users']
    );
@@ -43,10 +43,10 @@ subtest 'user object creation and methods' => sub {
    isa_ok($user, 'Sys::Export::Unix::UserDB::User');
    is($user->name, 'testuser', 'name accessor works');
    is($user->uid, 1001, 'uid accessor works');
-   is($user->gid, 1001, 'gid accessor works');
+   is($user->group, 'testuser', 'gid accessor works');
    is($user->passwd, 'x', 'passwd accessor works');
    is($user->gecos, 'Test User', 'gecos accessor works');
-   is($user->home, '/home/testuser', 'home accessor works');
+   is($user->dir, '/home/testuser', 'home accessor works');
    is($user->shell, '/bin/bash', 'shell accessor works');
    is($user->groups, { wheel => 1, users => 1 }, 'groups accessor works');
    
@@ -78,12 +78,12 @@ subtest 'user object creation and methods' => sub {
    isnt($user->groups, $cloned->groups, 'clone is deep copy');
    
    # Test required fields
-   like(dies { Sys::Export::Unix::UserDB::User->new(uid => 1001, gid => 1001) },
-       qr/User name is required/, 'name is required');
-   like(dies { Sys::Export::Unix::UserDB::User->new(name => 'test', gid => 1001) },
-       qr/User UID is required/, 'uid is required');
+   like(dies { Sys::Export::Unix::UserDB::User->new(uid => 1001, group => 'testuser') },
+       qr/User 'name' is required/, 'name is required');
+   like(dies { Sys::Export::Unix::UserDB::User->new(name => 'test', group => 'testuser') },
+       qr/User 'uid' is required/, 'uid is required');
    like(dies { Sys::Export::Unix::UserDB::User->new(name => 'test', uid => 1001) },
-       qr/User GID is required/, 'gid is required');
+       qr/User primary 'group' is required/, 'group is required');
 };
 
 subtest 'group object creation and methods' => sub {
@@ -110,46 +110,32 @@ subtest 'group object creation and methods' => sub {
    
    # Test required fields
    like(dies { Sys::Export::Unix::UserDB::Group->new(gid => 1001) },
-       qr/Group name is required/, 'name is required');
+       qr/Group 'name' is required/, 'name is required');
    like(dies { Sys::Export::Unix::UserDB::Group->new(name => 'test') },
-       qr/Group GID is required/, 'gid is required');
+       qr/Group 'gid' is required/, 'gid is required');
 };
 
 subtest 'add_user and add_group methods' => sub {
    my $db = Sys::Export::Unix::UserDB->new;
-   
-   # Test add_user with name
-   $db->add_user('testuser', uid => 1001, gid => 1001);
-   ok($db->user('testuser'), 'user was added');
-   is($db->users->{testuser}->uid, 1001, 'user has correct uid');
-   is($db->users->{testuser}->groups, {}, 'user starts with empty groups');
    
    # Test add_group with name
    $db->add_group('testgroup', gid => 1001);
    ok($db->group('testgroup'), 'group was added');
    is($db->groups->{testgroup}->gid, 1001, 'group has correct gid');
    
-   # Test add_user with user object
-   my $source_user = Sys::Export::Unix::UserDB::User->new(
-      name => 'cloneuser',
-      uid => 1002,
-      gid => 1002,
-      groups => ['testgroup', 'nonexistent']
-   );
+   # Test add_user with name
+   $db->add_user('testuser', uid => 1001, group => 'testgroup');
+   ok($db->user('testuser'), 'user was added');
+   is($db->users->{testuser}->uid, 1001, 'user has correct uid');
+   is($db->users->{testuser}->groups, {}, 'user starts with empty groups');
    
-   $db->add_user($source_user);
+   # Test add_user with user object
+   $db->add_user($db->user('testuser'), name => 'cloneuser', uid => 1002);
    ok($db->user('cloneuser'), 'user object was cloned and added');
    is($db->users->{cloneuser}->uid, 1002, 'cloned user has correct uid');
-   is($db->users->{cloneuser}->groups, { testgroup => 1 }, 'groups filtered to existing only');
    
    # Test add_group with group object
-   my $source_group = Sys::Export::Unix::UserDB::Group->new(
-      name => 'clonegroup',
-      gid => 1003,
-      passwd => 'x'
-   );
-   
-   $db->add_group($source_group);
+   $db->add_group($db->group('testgroup'), name => 'clonegroup', gid => 1003);
    ok($db->group('clonegroup'), 'group object was cloned and added');
    is($db->groups->{clonegroup}->gid, 1003, 'cloned group has correct gid');
 };
@@ -158,18 +144,18 @@ subtest 'conflict detection' => sub {
    my $db = Sys::Export::Unix::UserDB->new;
    
    # Add initial user and group
-   $db->add_user('user1', uid => 1001, gid => 1001);
    $db->add_group('group1', gid => 1001);
+   $db->add_user('user1', uid => 1001, group => 'group1');
    
    # Test name conflict error
-   like(dies { $db->add_user('user1', uid => 1002, gid => 1002) },
+   like(dies { $db->add_user('user1', uid => 1002, group => 'group1') },
        qr/Username 'user1' already exists/, 'name conflict detected');
    
    like(dies { $db->add_group('group1', gid => 1002) },
        qr/Group name 'group1' already exists/, 'group name conflict detected');
    
    # Test UID/GID conflict warning
-   like(warning { $db->add_user('user2', uid => 1001, gid => 1002) },
+   like(warning { $db->add_user('user2', uid => 1001, group => 'group1') },
        qr/UID 1001 already exists/, 'UID conflict warning');
    
    like(warning { $db->add_group('group2', gid => 1001) },
@@ -179,27 +165,35 @@ subtest 'conflict detection' => sub {
 subtest 'existence checking methods' => sub {
    my $db = Sys::Export::Unix::UserDB->new;
    
-   $db->add_user('testuser', uid => 1001, gid => 1001);
    $db->add_group('testgroup', gid => 1002);
+   $db->add_user('testuser', uid => 1001, group => 'testgroup');
    
    ok($db->user('testuser'), 'user returns true for existing user');
    ok(!$db->user('nonexistent'), 'user returns false for non-existing user');
+   ok($db->has_user('testuser'), 'has_user returns true for existing user');
+   ok(!$db->has_user('nonexistent'), 'has_user returns false for non-existing user');
    
    ok($db->group('testgroup'), 'group returns true for existing group');
    ok(!$db->group('nonexistent'), 'group returns false for non-existing group');
+   ok($db->has_group('testgroup'), 'has_group returns true for existing group');
+   ok(!$db->has_group('nonexistent'), 'has_group returns false for non-existing group');
    
    ok($db->user(1001), 'user returns true for existing uid');
    ok(!$db->user(9999), 'user returns false for non-existing uid');
+   ok($db->has_user(1001), 'has_user returns true for existing uid');
+   ok(!$db->has_user(9999), 'has_user returns false for non-existing uid');
    
    ok($db->group(1002), 'group returns true for existing gid');
    ok(!$db->group(9999), 'group returns false for non-existing gid');
+   ok($db->has_group(1002), 'has_group returns true for existing gid');
+   ok(!$db->has_group(9999), 'has_group returns false for non-existing gid');
 };
 
 subtest 'clone method' => sub {
    my $db = Sys::Export::Unix::UserDB->new;
    
-   $db->add_user('testuser', uid => 1001, gid => 1001);
    $db->add_group('testgroup', gid => 1001);
+   $db->add_user('testuser', uid => 1001, group => 'testgroup');
    $db->users->{testuser}->add_group('testgroup');
    
    my $cloned = $db->clone;
@@ -211,7 +205,7 @@ subtest 'clone method' => sub {
    is($cloned->users->{testuser}->groups, { testgroup => 1 }, 'cloned user has groups');
    
    # Modify original and verify clone is unchanged
-   $db->add_user('newuser', uid => 1002, gid => 1002);
+   $db->add_user('newuser', uid => 1002, group => 'testgroup');
    ok($db->user('newuser'), 'original has new user');
    ok(!$cloned->user('newuser'), 'clone does not have new user');
 };
@@ -221,70 +215,84 @@ subtest 'load from files' => sub {
    mkdir $test_dir;
    
    # Create test passwd file
-   my $passwd_data = join("\n",
-      'root:x:0:0:root:/root:/bin/bash',
-      'daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin',
-      'testuser:x:1001:1001:Test User:/home/testuser:/bin/bash',
-      'alice:x:1002:1002:Alice:/home/alice:/bin/bash',
-      ''
-   );
-   mkfile(catfile($test_dir, 'passwd'), $passwd_data);
+   mkfile(catfile($test_dir, 'passwd'), <<~'END');
+      root:x:0:0:root:/root:/bin/bash
+      daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+      testuser:x:1001:1001:Test User:/home/testuser:/bin/bash
+      alice:x:1002:1002:Alice:/home/alice:/bin/bash
+      END
    
    # Create test group file
-   my $group_data = join("\n",
-      'root:x:0:',
-      'daemon:x:1:',
-      'testgroup:x:1001:testuser,alice',
-      'wheel:x:1002:alice',
-      ''
-   );
-   mkfile(catfile($test_dir, 'group'), $group_data);
+   mkfile(catfile($test_dir, 'group'), <<~'END');
+      root:x:0:
+      daemon:x:1:
+      testgroup:x:1001:testuser,alice
+      wheel:x:1002:alice
+      END
    
    # Create test shadow file
-   my $shadow_data = join("\n",
-      'root:!:19000:0:99999:7:::',
-      'testuser:$6$salt$hash:19000:0:99999:7:::',
-      ''
-   );
-   mkfile(catfile($test_dir, 'shadow'), $shadow_data);
+   mkfile(catfile($test_dir, 'shadow'), <<~'END');
+      root:!:19000:0:99999:7:::
+      testuser:$6$salt$hash:19000:0:99999:7:::
+      END
    
-   my $db = Sys::Export::Unix::UserDB->new;
-   $db->load($test_dir);
+   my $db = Sys::Export::Unix::UserDB->new(load => $test_dir);
    
    # Verify users loaded
-   ok($db->user('root'), 'root user loaded');
-   ok($db->user('testuser'), 'testuser loaded');
-   ok($db->user('alice'), 'alice loaded');
-   
-   is($db->users->{testuser}->uid, 1001, 'testuser has correct uid');
-   is($db->users->{testuser}->home, '/home/testuser', 'testuser has correct home');
-   
-   # Verify groups loaded
-   ok($db->group('root'), 'root group loaded');
-   ok($db->group('testgroup'), 'testgroup loaded');
-   
-   # Verify group membership
-   is($db->users->{testuser}->groups, { testgroup => 1 }, 'testuser in testgroup');
-   is($db->users->{alice}->groups, { testgroup => 1, wheel => 1 }, 'alice in multiple groups');
-   
-   # Verify shadow data
-   is($db->users->{testuser}->passwd, '$6$salt$hash', 'shadow password loaded');
-   is($db->users->{testuser}->lastchg, '19000', 'shadow lastchg loaded');
+   is(
+      $db->users,
+      {  root => object {
+            call uid => 0;
+            call group => 'root';
+            call passwd => '!';
+         },
+         daemon => object {
+            call uid => 1;
+            call group => 'daemon';
+            call passwd => undef;
+         },
+         testuser => object {
+            call uid => 1001;
+            call group => 'testgroup';
+            call groups => { testgroup => 1 };
+            call dir => '/home/testuser';
+            call shell => '/bin/bash';
+            call passwd => '$6$salt$hash';
+            call pw_change_time => 19000 * 86400;
+         },
+         alice => object {
+            call uid => 1002;
+            call group => 'wheel';
+            call groups => { testgroup => 1, wheel => 1 };
+            call passwd => undef;
+         },
+      },
+      'users loaded'
+   );
+   is(
+      $db->groups,
+      {  root      => object { call gid => 0; },
+         daemon    => object { call gid => 1; },
+         testgroup => object { call gid => 1001; },
+         wheel     => object { call gid => 1002; },
+      },
+      'groups loaded'
+   );
    
    # Test loading non-existent directory
-   like(dies { $db->load('/nonexistent') }, qr/Cannot open/, 'dies on missing files');
+   like(dies { $db->load('/nonexistent') }, qr/not found/, 'dies on missing files');
 };
 
 subtest 'save to files' => sub {
    my $db = Sys::Export::Unix::UserDB->new;
    
    # Add test data
-   $db->add_user('testuser', uid => 1001, gid => 1001, gecos => 'Test User', 
-              home => '/home/testuser', shell => '/bin/bash');
-   $db->add_user('alice', uid => 1002, gid => 1002, gecos => 'Alice', 
-              home => '/home/alice', shell => '/bin/bash');
    $db->add_group('testgroup', gid => 1001);
    $db->add_group('wheel', gid => 1002);
+   $db->add_user('testuser', uid => 1001, group => 'testgroup', gecos => 'Test User', 
+              dir => '/home/testuser', shell => '/bin/bash');
+   $db->add_user('alice', uid => 1002, group => 'wheel', gecos => 'Alice', 
+              dir => '/home/alice', shell => '/bin/bash');
    
    # Add group memberships
    $db->users->{testuser}->add_group('testgroup');
@@ -292,7 +300,7 @@ subtest 'save to files' => sub {
    $db->users->{alice}->add_group('wheel');
    
    # Add shadow data
-   $db->users->{testuser}->lastchg('19000');
+   $db->users->{testuser}->pw_change_time(19000 * 86400);
    $db->users->{testuser}->passwd('$6$salt$hash');
    
    # Test saving to hashref
@@ -301,7 +309,7 @@ subtest 'save to files' => sub {
    
    like($files{passwd}, qr/testuser:x:1001:1001:Test User:\/home\/testuser:\/bin\/bash/, 
        'passwd file contains testuser');
-   like($files{group}, qr/testgroup:.*:1001:alice,testuser/,
+   like($files{group}, qr/testgroup:.*:1001:alice/,
        'group file contains membership');
    like($files{shadow}, qr/testuser:\$6\$salt\$hash:19000/, 
        'shadow file contains testuser');
@@ -319,7 +327,7 @@ subtest 'save to files' => sub {
    like($saved_passwd, qr/testuser:x:1001:1001/, 'saved passwd contains testuser');
    
    my $saved_group = slurp(catfile($save_dir, 'group'));
-   like($saved_group, qr/testgroup:.*:1001:alice,testuser/, 'saved group contains membership');
+   like($saved_group, qr/testgroup:.*?:1001:alice/, 'saved group contains membership');
 };
 
 subtest 'roundtrip load and save' => sub {
@@ -327,27 +335,26 @@ subtest 'roundtrip load and save' => sub {
    my $orig_dir = catdir($tmp, 'orig');
    mkdir $orig_dir;
    
-   my $passwd_data = join("\n",
-      'root:x:0:0:root:/root:/bin/bash',
-      'testuser:x:1001:1001:Test User:/home/testuser:/bin/bash',
-      'alice:x:1002:1002:Alice:/home/alice:/bin/bash',
-      ''
-   );
+   my $passwd_data = <<~'END';
+      root:*:0:0:root:/root:/bin/bash
+      testuser:x:1001:1001:Test User:/home/testuser:/bin/bash
+      alice:x:1002:1002:Alice:/home/alice:/bin/bash
+      END
    mkfile(catfile($orig_dir, 'passwd'), $passwd_data);
    
-   my $group_data = join("\n",
-      'root:x:0:',
-      'testgroup:x:1001:testuser,alice',
-      'wheel:x:1002:alice',
-      ''
-   );
+   my $group_data = <<~'END';
+      root:*:0:
+      wheel:*:10:alice
+      users:*:100:alice,testuser
+      testuser:*:1001:
+      alice:*:1002:
+      END
    mkfile(catfile($orig_dir, 'group'), $group_data);
    
-   my $shadow_data = join("\n",
-      'testuser:$6$salt$hash:19000:0:99999:7:::',
-      'alice:!:19001:::::',
-      ''
-   );
+   my $shadow_data = <<~'END';
+      testuser:$6$salt$hash:19000:0:99999:7:::
+      alice:!:19001::::::
+      END
    mkfile(catfile($orig_dir, 'shadow'), $shadow_data);
    
    # Load, then save
@@ -358,19 +365,30 @@ subtest 'roundtrip load and save' => sub {
    mkdir $save_dir;
    $db->save($save_dir);
    
-   # Load the saved data and verify
-   my $db2 = Sys::Export::Unix::UserDB->new;
-   $db2->load($save_dir);
-   
-   ok($db2->user('testuser'), 'roundtrip preserved testuser');
-   ok($db2->user('alice'), 'roundtrip preserved alice');
-   ok($db2->group('testgroup'), 'roundtrip preserved testgroup');
-   
-   is($db2->users->{testuser}->groups, { testgroup => 1 }, 'roundtrip preserved testuser groups');
-   is($db2->users->{alice}->groups, { testgroup => 1, wheel => 1 }, 'roundtrip preserved alice groups');
-   
-   is($db2->users->{testuser}->passwd, '$6$salt$hash', 'roundtrip preserved shadow password');
-   is($db2->users->{testuser}->lastchg, '19000', 'roundtrip preserved shadow data');
+   is( slurp(catfile($save_dir, 'passwd')), $passwd_data, 'passwd' );
+   is( slurp(catfile($save_dir, 'group')),  $group_data,  'group' );
+   is( slurp(catfile($save_dir, 'shadow')), $shadow_data, 'shadow' );
+};
+
+subtest 'auto import from host' => sub {
+   # presume every host has a 'root' user and group
+   skip_all "This host doesn't have a root user?"
+      unless 0 == (getpwnam('root')//-1);
+
+   my $db = Sys::Export::Unix::UserDB->new(auto_import => 1);
+   is( $db->user('root'),
+      object {
+         call uid => 0;
+         call group => 'root';
+      },
+      'auto-loaded user "root"'
+   );
+   is( $db->group('root'),
+      object {
+         call gid => 0;
+      },
+      'auto-loaded group "root"'
+   );
 };
 
 done_testing;
