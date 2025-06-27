@@ -21,9 +21,7 @@ package Sys::Export::Unix;
 
 This object contains the logic for exporting unix-style systems.
 
-=head1 CONSTRUCTOR
-
-=head2 new
+=constructor new
 
   Sys::Export::Unix->new(\%attributes); # hashref
   Sys::Export::Unix->new(%attributes);  # key/value list
@@ -55,9 +53,29 @@ Options:
 
 =over
 
-=item rewrite_paths
+=item rewrite_path
 
 Convenience for calling L</rewrite_path> using a hashref of C<< { src => dst } >> pairs.
+
+=item rewrite_user
+
+Convenience for calling L</rewrite_user> using a hashref of C<< { src => dst } >> pairs.
+
+=item rewrite_group
+
+Convenience for calling L</rewrite_group> using a hashref of C<< { src => dst } >> pairs.
+
+=item src_userdb
+
+An instance of L<Sys::Export::Unix::UserDB>, or constructor parameters for one.  The default is
+to read C<< $src/etc/passwd >>, or fall back to the getpwnam function of the host.
+See L</USER REMAPPING> for more details.
+
+=item dst_userdb
+
+An instance of L<Sys::Export::Unix::UserDB>, or constructor parameters for one.
+If defined, this will trigger name-based translations of all UID/GID values written to the
+destination filesystem.  See L</USER REMAPPING> for more details.
 
 =item tmp
 
@@ -95,19 +113,29 @@ copied and whether they were patched.
 =cut
 
 use v5.36;
-use Carp;
-use Cwd 'abs_path';
+use Carp ();
+use Cwd ();
 use Fcntl qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT 
               S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFMT );
-require File::Temp;
-require Scalar::Util;
-require POSIX;
+use File::Temp ();
+use Scalar::Util ();
+use POSIX ();
 our $have_file_map= eval { require File::Map; };
 our $have_unix_mknod= eval { require Unix::Mknod; };
+my sub croak    { goto \&Carp::croak }
+my sub carp     { goto \&Carp::carp }
+my sub abs_path { goto \&Cwd::abs_path }
+my sub isa_hash   :prototype($) { ref $_[0] eq 'HASH' }
+my sub isa_array  :prototype($) { ref $_[0] eq 'ARRAY' }
+my sub isa_userdb :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
+my sub isa_user   :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
+my sub isa_group  :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
+my sub isa_cpio   :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->isa('Sys::Expot::CPIO') }
+my sub isa_int    :prototype($) { Scalar::Util::looks_like_number($_[0]) && int($_[0]) == $_[0] }
 
 sub new {
    my $class= shift;
-   my %attrs= @_ == 1 && ref $_[0] eq 'HASH'? %{$_[0]}
+   my %attrs= @_ == 1 && isa_hash $_[0]? %{$_[0]}
       : !(@_ & 1)? @_
       : croak "Expected hashref or even-length list";
 
@@ -118,7 +146,7 @@ sub new {
 
    defined $attrs{dst} or croak "Require 'dst' attribute";
    unless (ref $attrs{dst} eq 'CODE') {
-      if (ref $attrs{dst} && ref($attrs{dst})->isa('Sys::Export::CPIO')) {
+      if (isa_cpio $attrs{dst}) {
          my $cpio= $attrs{dst};
          $attrs{dst}= sub($exporter, $file, @) { $cpio->append($file) };
       }
@@ -147,25 +175,30 @@ sub new {
 
    $self->_build_log_fn($self->{log} //= 'info');
 
-   if (my $rewrites= delete $self->{rewrite_paths}) {
-      $self->rewrite_path($_ => $rewrites->{$_})
-         for keys %$rewrites;
+   for my $method (qw( rewrite_path rewrite_user rewrite_group )) {
+      my $r= delete $self->{$method}
+         or next;
+      $self->$method($_ => $r->{$_})
+         for keys %$r;
    }
    return $self;
 }
 
-=head1 ATTRIBUTES
-
-=head2 src
+=attribute src
 
 The root of the source filesystem.  It must be the actual root used by the symlinks and library
 paths inside this filesystem, or things will break.
 
-=head2 src_abs
+=attribute src_abs
 
 The C<abs_path> of the root of the source filesystem, always ending with '/'.
 
-=head2 dst
+=attribute src_userdb
+
+An instance of L<Sys::Export::Unix::UserDB>.  This attribute is C<undef> until it is needed,
+unless you specified it to the constructor.  See L</USER REMAPPING> for details.
+
+=attribute dst
 
 The root of the destination filesystem, OR a coderef which receives files which are ready to be
 recorded.  This must be the logical root of your destination filesystem, which will be used when
@@ -175,36 +208,41 @@ is
 
   sub ($exporter, $file_attrs) { ... }
 
-=head2 dst_abs
+=attribute dst_abs
 
 The C<abs_path> of the root of the destination filesystem, always ending with '/'.
 This is only defined if L<dst> is B<not> a coderef.
 
-=head2 tmp
+=attribute dst_userdb
+
+An instance of L<Sys::Export::Unix::UserDB>.  This attribute is C<undef> until it is needed,
+unless you specified it to the constructor.  See L</USER REMAPPING> for details.
+
+=attribute tmp
 
 The C<abs_path> of a directory to use for temporary staging before renaming into L</dst>.
 This must be in the same volume as C<dst> so that C<rename()> can be used to move temporary
 files into their C<dst> location.
 
-=head2 src_path_set
+=attribute src_path_set
 
 A hashref of all source paths which have been processed, and which destination path they were
 written as.  All paths are logically absolute to their respective roots, but without a leading
 slash.
 
-=head2 dst_path_set
+=attribute dst_path_set
 
 A hashref of all destination paths which have been created (as keys).  If the value of the key
 is defined, it is the source path.  If not defined, it means the destination was created
 without reference to a source path.
 
-=head2 uid_set
+=attribute dst_uid_used
 
-The set of numeric user IDs seen while copying paths.
+The set of numeric user IDs which have been written to dst.
 
-=head2 gid_set
+=attribute dst_gid_used
 
-The set of numeric group IDs seen while copying paths.
+The set of numeric group IDs which have been written to dst.
 
 =cut
 
@@ -215,10 +253,10 @@ sub dst_abs($self)      { $self->{dst_abs} }
 sub tmp($self)          { $self->{tmp} }
 sub src_path_set($self) { $self->{src_path_set} //= {} }
 sub dst_path_set($self) { $self->{dst_path_set} //= {} }
-sub uid_set($self)      { $self->{uid_set} //= {} }
-sub gid_set($self)      { $self->{gid_set} //= {} }
+sub dst_uid_used($self) { $self->{dst_uid_used} //= {} }
+sub dst_gid_used($self) { $self->{dst_gid_used} //= {} }
 
-=head2 path_rewrite_regex
+=attribute path_rewrite_regex
 
 A regex that matches the longest prefix of a source path having a rewrite rule.
 
@@ -244,7 +282,7 @@ sub DESTROY($self, @) {
    $self->finish if $self->{_delayed_apply_stat};
 }
 
-=head2 log
+=attribute log
 
   $exporter->log('info');
   $exporter->log($logger);
@@ -294,9 +332,7 @@ sub _log_action($self, $verb, $src, $dst, @notes) {
    }
 }
 
-=head1 METHODS
-
-=head2 rewrite_path
+=method rewrite_path
 
   $exporter->rewrite_path($src_prefix, $dst_prefix);
 
@@ -328,7 +364,6 @@ sub _has_rewrites($self) {
 
 # Resolve symlinks in paths within $root/ treating absolute links as references to $root.
 # This returns undef if:
-#   * a '..' component tries to exit the src/ root
 #   * the path doesn't exist at any point during resolution
 #   * 'stat' fails at any point in the path (maybe for permissions)
 #   * it resolves more than 256 symlinks
@@ -345,8 +380,8 @@ sub _chroot_abs_path($self, $root, $path) {
       my (undef, undef, $mode)= lstat $abs
          or return undef;
       if ($part eq '..') {
-         return undef if @abs <= @base;
-         pop @abs;
+         # In Linux at least, ".." from root directory loops back to itself
+         pop @abs if @abs > @base;
       }
       elsif (S_ISLNK($mode)) {
          return undef if --$lim <= 0;
@@ -368,7 +403,121 @@ sub _src_abs_path($self, $path) {
    $self->_chroot_abs_path($self->{src_abs}, $path);
 }
 
-=head2 add
+=head1 USER REMAPPING
+
+This module tries to be helpful with rewriting UID/GID from your source filesystem to the
+destination filesystem, but also stay out of your way if you don't need that feature.  In the
+simplest case, you are building an initrd from an environment with the same user database as
+your final system image and UID/GID can be copied as-is.  In other cases, you might be pulling
+files from Alpine to be used for an initrd that starts a Debian system, and need to map
+ownership by name instead of number.
+
+The basic rule is that name-based mapping is enabled or disabled by whether attribute
+L</dst_userdb> is defined or not.  If you pass that as an initial constructor attribute, then
+name-based mapping is enabled from the start.  If you request a destination name in a call
+to L</rewrite_user> or L</rewrite_group>, they will automatically instantiate C<dst_userdb>.
+However, you can also perform ID remapping without name databases.  If every call to
+C<rewrite_user> and C<rewrite_group> exclusively use numbers, then the numeric mapping is
+handled without triggering C<dst_userdb> to be created.
+
+If name mapping is enabled, then L</src_userdb> must also be defined.  If you don't initialize
+it, it will be automatically instantiated from C<$src/etc/passwd>, falling back to the users of
+the host system via L<getpwnam> etc.
+
+=head2 Name Mapping Behavior
+
+Any time a new not-yet-mapped ID is encountered, it checks the C<src_userdb> to find out what
+name is associated with that ID.  If not found, it may import it from C<getpwnam>/C<getgrnam>.
+If still not found, it dies.  Then it checks for any name-baased rewrites to determine what
+name to look for in C<dst_userdb>, defaulting to the same name as C<src_userdb>.  If
+C<dst_userdb> doesn't have that name yet, the user is copied from C<src_userdb>, but croaks if
+the UID/GID would conflict with another entry in C<dst_userdb>.  Once the src UID/GID and dst
+UID/GID are both known, it adds those to the numeric mapping, so further name lookups are not
+needed for that source ID.
+
+=method rewrite_user
+
+  $exporter->rewrite_user( $src_name_or_uid => $dst_name_or_uid );
+
+If you rewrite from a UID to a UID, this doesn't consider any names, and does an efficient
+numeric remapping.
+
+If src is a name, this instantiates L</src_userdb> if it doesn't exist, and resolves the
+name (which must exist), then creates a numeric mapping.
+
+If dst is a name, this instantiates L</dst_userdb> if it doesn't exist, and resolves the name
+(which must exist, but gets auto-imported from C<src_userdb> in the default configuration)
+then creates a numeric mapping.
+
+=method rewrite_group
+
+  $exporter->rewrite_group( $local_name_or_gid => $exported_name_or_gid );
+
+Same semantics as L</rewrite_user> but for groups.
+
+=cut
+
+sub rewrite_user($self, $src, $dst) {
+   croak "A rewrite already exists for $src"
+      if $self->{_user_rewrite_map}{$src};
+
+   if (!isa_int($dst)) {
+      my $dst_userdb= ($self->{dst_userdb} //= $self->_build_dst_userdb);
+      my $u= $dst_userdb->user($dst)
+         or croak "No user '$dst' in dst_userdb";
+      $dst= $u->uid;
+   }
+   if (!isa_int($src)) {
+      # The name must exist in src userdb
+      my $src_userdb= ($self->{src_userdb} //= $self->_build_src_userdb);
+      my $u= $src_userdb->user($src)
+         or croak "No user '$src' in src_userdb";
+      $self->{_user_rewrite_map}{$src}= $dst;
+      $src= $u->uid;
+   }
+   $self->{_user_rewrite_map}{$src}= $dst;
+}
+
+sub rewrite_group($self, $src, $dst) {
+   croak "A rewrite already exists for $src"
+      if $self->{_group_rewrite_map}{$src};
+
+   if (!isa_int($dst)) {
+      my $dst_userdb= ($self->{dst_userdb} //= $self->_build_dst_userdb);
+      my $g= $dst_userdb->group($dst)
+         or croak "No group '$dst' in dst_userdb";
+      $dst= $g->gid;
+   }
+   if (!isa_int($src)) {
+      # The name must exist in src userdb
+      my $src_userdb= ($self->{src_userdb} //= $self->_build_src_userdb);
+      my $g= $src_userdb->group($src)
+         or croak "No group '$src' in src_userdb";
+      $self->{_group_rewrite_map}{$src}= $dst;
+      $src= $g->gid;
+   }
+   $self->{_group_rewrite_map}{$src}= $dst;
+}
+
+sub _build_src_userdb($self) {
+   # The default source UserDB pulls from src/etc/passwd and auto_imports users from the host
+   my $udb= Sys::Export::Unix::UserDB->new(auto_import => 1);
+   $udb->load($self->src_abs . 'etc')
+      if -f $self->src_abs . 'etc/passwd';
+   $udb;
+}
+
+sub _build_dst_userdb($self) {
+   # The default dest UserDB uses any dst/etc/passwd and auto_imports users from src_userdb
+   my $udb= Sys::Export::Unix::UserDB->new(
+      auto_import => ($self->{src_userdb} //= $self->_build_src_userdb)
+   );
+   $udb->load($self->dst_abs . 'etc')
+      if defined $self->dst_abs && -f $self->dst_abs . 'etc/passwd';
+   $udb;
+}
+
+=method add
 
   $exporter->add($src_path, ...);
   $exporter->add(\%file_attrs, ...);
@@ -407,6 +556,7 @@ Returns C<$exporter> for chaining.
 sub add {
    my $self= shift;
    my $add= ($self->{add} //= []);
+   my $dst_userdb;
    push @$add, @_;
    while (@$add) {
       my $next= shift @$add;
@@ -423,6 +573,8 @@ sub add {
             if $self->{_log_debug};
          @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$next)
             or croak "lstat '$self->{src_abs}$next': $!";
+         $file{uid}= $self->{_user_rewrite_map}{$file{uid}} // $file{uid};
+         $file{gid}= $self->{_group_rewrite_map}{$file{gid}} // $file{gid};
          # If $next is itself a symlink, we want to export this name, and also the thing
          # it references.
          if (S_ISLNK($file{mode})) {
@@ -452,6 +604,22 @@ sub add {
          $file{name}= $self->get_dst_for_src($next);
          $self->{src_path_set}{$next}= $file{name};
       }
+
+      if (defined $file{user} && !defined $file{uid}) {
+         $dst_userdb //= ($self->{dst_userdb} //= $self->_build_dst_userdb);
+         my $u= $dst_userdb->user($file{user})
+            // croak "Unknown user '$file{user}' for file '$file{name}'";
+         $file{uid}= $u->uid;
+      }
+      ++$self->{dst_uid_used}{$file{uid}} if defined $file{uid};
+
+      if (defined $file{group} && !defined $file{gid}) {
+         $dst_userdb //= ($self->{dst_userdb} //= $self->_build_dst_userdb);
+         my $g= $dst_userdb->group($file{group})
+            // croak "Unknown group '$file{group}' for file '$file{name}'";
+         $file{gid}= $g->gid;
+      }
+      ++$self->{dst_gid_used}{$file{gid}} if defined $file{gid};
 
       # Has this destination already been written?
       if (defined(my $orig= $self->{dst_path_set}{$file{name}})) {
@@ -555,7 +723,7 @@ sub _attrs_from_array_notation {
    return ( %attrs, @_ );
 }
 
-=head2 skip
+=method skip
 
   $exporter->skip($src_path);
 
@@ -570,7 +738,7 @@ sub skip($self, $path) {
    $self;
 }
 
-=head2 finish
+=method finish
 
 Apply any postponed changes to the destination filesystem.  For instance, this applies mtimes
 to directories since writing the contents of the directory would have changed the mtime.
@@ -586,7 +754,7 @@ sub finish($self) {
    }
 }
 
-=head2 get_dst_for_src
+=method get_dst_for_src
 
   my $dst_path= $exporter->get_dst_for_src($src_path);
 
@@ -601,6 +769,22 @@ sub get_dst_for_src($self, $path) {
    $self->{_log_trace}->("  rewrote '$path' to '$rewrote'")
       if $self->{_log_trace} && $path ne $rewrote;
    return $rewrote;
+}
+
+=method get_dst_uid_gid
+
+  ($uid, $gid)= $exporter->get_dst_uid_gid($uid, $gid);
+
+Given a source uid and gid, return the destination uid and gid.
+See L</USER REMAPPING> for details.
+
+=cut
+
+sub get_dst_uid_gid($self, $uid, $gid) {
+   return (
+      $self->{_user_rewrite_map}{$uid} // $uid,
+      $self->{_group_rewrite_map}{$gid} // $gid,
+   );
 }
 
 sub _syswrite_all($tmp, $content_ref) {
@@ -903,8 +1087,6 @@ sub _apply_stat($self, $abs_path, $stat) {
       POSIX::lchown($uid, $gid, $abs_path) or croak "lchown($uid, $gid, $abs_path): $!"
          if $uid >= 0 || $gid >= 0;
    }
-   $self->uid_set->{$uid}++ if $uid >= 0;
-   $self->gid_set->{$gid}++ if $gid >= 0;
 
    my @delayed;
 
