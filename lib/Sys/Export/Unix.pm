@@ -514,6 +514,9 @@ sub _build_dst_userdb($self) {
    );
    $udb->load($self->dst_abs . 'etc')
       if defined $self->dst_abs && -f $self->dst_abs . 'etc/passwd';
+   # make sure the rewrite hashes exist, used as a flag that rerites need to occur.
+   $self->{_user_rewrite_map} //= {};
+   $self->{_group_rewrite_map} //= {};
    $udb;
 }
 
@@ -573,8 +576,9 @@ sub add {
             if $self->{_log_debug};
          @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$next)
             or croak "lstat '$self->{src_abs}$next': $!";
-         $file{uid}= $self->{_user_rewrite_map}{$file{uid}} // $file{uid};
-         $file{gid}= $self->{_group_rewrite_map}{$file{gid}} // $file{gid};
+         # Remap the UID/GID if that feature was requested
+         @file{'uid','gid'}= $self->get_dst_uid_gid(@file{'uid','gid'}, " in source filesystem at '$next'")
+            if $self->{_user_rewrite_map} || $self->{_group_rewrite_map};
          # If $next is itself a symlink, we want to export this name, and also the thing
          # it references.
          if (S_ISLNK($file{mode})) {
@@ -778,13 +782,50 @@ sub get_dst_for_src($self, $path) {
 Given a source uid and gid, return the destination uid and gid.
 See L</USER REMAPPING> for details.
 
+This is the same routine used after every C<stat> on the source filesystem to compute the
+uid/gid written to C<dst>.
+
 =cut
 
-sub get_dst_uid_gid($self, $uid, $gid) {
-   return (
-      $self->{_user_rewrite_map}{$uid} // $uid,
-      $self->{_group_rewrite_map}{$gid} // $gid,
-   );
+sub get_dst_uid_gid($self, $uid, $gid, $context='') {
+   # If dst_userdb is defined, convert these source uid/gid to names, then find the name
+   # in dst_userdb, then write those uid/gid.  But, if _user_rewrite_map has an entry for
+   # the UID or user, then go with that.
+   my $dst_userdb= $self->{dst_userdb};
+   if ($dst_userdb || $self->{_user_rewrite_map} || $self->{_group_rewrite_map}) {
+      my $dst_uid= $self->{_user_rewrite_map}{$uid};
+      my $dst_gid= $self->{_group_rewrite_map}{$gid};
+      if ($dst_userdb && !defined $dst_uid) {
+         my $src_userdb= ($self->{src_userdb} //= $self->_build_src_userdb);
+         my $src_user= $src_userdb->user($uid)
+            or croak "Unknown UID $uid$context";
+         $dst_uid= $self->{_user_rewrite_map}{$src_user->name};
+         if (!defined $dst_uid) {
+            my $dst_user= $dst_userdb->user($src_user->name)
+               or croak "User ".$src_user->name." not found in dst_userdb$context";
+            $dst_uid= $dst_user->uid;
+         }
+         # cache it
+         $self->{_user_rewrite_map}{$src_user->name}= $dst_uid;
+         $self->{_user_rewrite_map}{$uid}= $dst_uid;
+      }
+      if ($dst_userdb && !defined $dst_gid) {
+         my $src_userdb= ($self->{src_userdb} //= $self->_build_src_userdb);
+         my $src_group= $src_userdb->group($gid)
+            or croak "Unknown GID $gid$context";
+         $dst_gid= $self->{_group_rewrite_map}{$src_group->name};
+         if (!defined $dst_gid) {
+            my $dst_group= $dst_userdb->group($src_group->name)
+               or croak "Group ".$src_group->name." not found in dst_userdb$context";
+            $dst_gid= $dst_group->gid;
+         }
+         # cache it
+         $self->{_group_rewrite_map}{$src_group->name}= $dst_gid;
+         $self->{_group_rewrite_map}{$gid}= $dst_gid;
+      }
+      return ($dst_uid, $dst_gid);
+   }
+   return ($uid, $gid);
 }
 
 sub _syswrite_all($tmp, $content_ref) {
