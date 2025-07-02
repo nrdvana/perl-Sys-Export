@@ -5,21 +5,18 @@ package Sys::Export::Unix::UserDB;
 use v5.36;
 use warnings;
 use Carp ();
-use File::Spec ();
-use Storable ();
+use File::Spec::Functions qw( catfile );
+use Storable qw( dclone );
 use Scalar::Util ();
 use User::pwent qw( getpwnam pw_has );
+use Sys::Export qw( :isa );
 
-# lexical imports
-my sub catfile { File::Spec->catfile(@_) }
-my sub croak { goto \&Carp::croak }
-my sub carp { goto \&Carp::carp }
-my sub dclone { goto \&Storable::dclone }
+# making lexical subs allows these to be seen by inner packages as well
+# and removes need for namespace::clean
+my sub carp       { goto \&Carp::carp }
+my sub croak      { goto \&Carp::croak }
 my sub isa_hash   :prototype($) { ref $_[0] eq 'HASH' }
 my sub isa_array  :prototype($) { ref $_[0] eq 'ARRAY' }
-my sub isa_userdb :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
-my sub isa_user   :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
-my sub isa_group  :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
 my sub isa_int    :prototype($) { Scalar::Util::looks_like_number($_[0]) && int($_[0]) == $_[0] }
 
 =head1 SYNOPSIS
@@ -820,7 +817,6 @@ Days after max when user can still log in and immediately change password
 
 package Sys::Export::Unix::UserDB::User {
    use v5.36;
-   use Carp qw(croak);
    our @CARP_NOT= qw( Sys::Export::Unix::UserDB );
    our %known_attrs= map +($_ => 1), qw( name uid passwd group groups comment gecos dir shell
       quota pw_change_time pw_min_days pw_max_days pw_warn_days pw_inactive_days expire_time );
@@ -950,7 +946,6 @@ Group password, which should never be used anyway.  Leave this C<undef> or C<'*'
 
 package Sys::Export::Unix::UserDB::Group {
    use v5.36;
-   use Carp qw(croak);
    our @CARP_NOT= qw( Sys::Export::Unix::UserDB );
    our %known_attrs= map +($_ => 1), qw( name gid passwd );
 
@@ -989,6 +984,14 @@ package Sys::Export::Unix::UserDB::Group {
 
    sub import {}
    sub DESTROY {}
+}
+
+# Avoiding dependency on namespace::clean
+{  no strict 'refs';
+   delete @{"Sys::Export::Unix::"}{qw(
+      croak carp catfile dclone getpwnam pw_has
+      isa_export_dst isa_exporter isa_group isa_user isa_userdb
+   )};
 }
 
 1;

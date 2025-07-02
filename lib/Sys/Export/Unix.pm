@@ -39,13 +39,8 @@ The root of the system to export from (often '/', but you must specify this)
 The root of the exported system.  This directory must exist, and should be empty unless you
 specify 'on_conflict'.
 
-It can also be a coderef, which avoids the entire construction of a staging directory, and
-doesn't require root permission to operate.  The arguments are the Export object and a hashref
-of file attributes the same as passed to L</add>:
-
-  sub ($exporter, $file_attrs) { ... }
-
-It can also be an instance of L<Sys::Export::CPIO> which is coerced into a coderef for you.
+It can also be an object with 'add' and 'finish' methods, which avoids the entire construction
+of a staging directory, and doesn't require root permission to operate.
 
 =back
 
@@ -113,25 +108,19 @@ copied and whether they were patched.
 =cut
 
 use v5.36;
-use Carp ();
-use Cwd ();
+use Carp qw( croak carp );
+use Cwd qw( abs_path );
 use Fcntl qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT 
               S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFMT );
+use Scalar::Util qw( blessed looks_like_number );
+use Sys::Export qw( :isa );
 use File::Temp ();
-use Scalar::Util ();
 use POSIX ();
 our $have_file_map= eval { require File::Map; };
 our $have_unix_mknod= eval { require Unix::Mknod; };
-my sub croak    { goto \&Carp::croak }
-my sub carp     { goto \&Carp::carp }
-my sub abs_path { goto \&Cwd::abs_path }
 my sub isa_hash   :prototype($) { ref $_[0] eq 'HASH' }
 my sub isa_array  :prototype($) { ref $_[0] eq 'ARRAY' }
-my sub isa_userdb :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
-my sub isa_user   :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
-my sub isa_group  :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
-my sub isa_cpio   :prototype($) { Scalar::Util::blessed($_[0]) && $_[0]->isa('Sys::Expot::CPIO') }
-my sub isa_int    :prototype($) { Scalar::Util::looks_like_number($_[0]) && int($_[0]) == $_[0] }
+my sub isa_int    :prototype($) { looks_like_number($_[0]) && int($_[0]) == $_[0] }
 
 sub new {
    my $class= shift;
@@ -145,23 +134,17 @@ sub new {
    $attrs{src_abs}= $abs_src eq '/'? $abs_src : "$abs_src/";
 
    defined $attrs{dst} or croak "Require 'dst' attribute";
-   unless (ref $attrs{dst} eq 'CODE') {
-      if (isa_cpio $attrs{dst}) {
-         my $cpio= $attrs{dst};
-         $attrs{dst}= sub($exporter, $file, @) { $cpio->append($file) };
-      }
-      else {
-         my $dst_abs= abs_path($attrs{dst} =~ s,(?<=[^/])$,/,r)
-            or croak "dst directory '$attrs{dst}' does not exist";
-         length $dst_abs > 1
-            or croak "cowardly refusing to export to '$dst_abs'";
-         $attrs{dst_abs}= "$dst_abs/";
-      }
+   unless (isa_export_dst $attrs{dst}) {
+      my $dst_abs= abs_path($attrs{dst} =~ s,(?<=[^/])$,/,r)
+         or croak "dst directory '$attrs{dst}' does not exist";
+      length $dst_abs > 1
+         or croak "cowardly refusing to export to '$dst_abs'";
+      $attrs{dst_abs}= "$dst_abs/";
    }
 
    $attrs{tmp} //= do {
       my $tmp= File::Temp->newdir;
-      unless (ref $attrs{dst} eq 'CODE') {
+      unless (isa_export_dst $attrs{dst}) {
          # Make sure can rename() from this $tmp to $dst
          my ($tmp_dev)= stat "$tmp/";
          my ($dst_dev)= stat $attrs{dst};
@@ -1225,6 +1208,16 @@ sub _patchelf($self, $path, @args) {
    $wstat == 0
       or croak "patchelf '$path' failed: $err";
    1;
+}
+
+# Avoiding dependency on namespace::clean
+{  no strict 'refs';
+   delete @{"Sys::Export::Unix::"}{qw(
+      croak carp abs_path blessed looks_like_number
+      isa_export_dst isa_exporter isa_group isa_user isa_userdb
+      S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT 
+      S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFMT 
+   )};
 }
 
 1;

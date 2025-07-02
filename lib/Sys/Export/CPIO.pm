@@ -13,9 +13,9 @@ require Sys::Export::Unix; # for _dev_major_minor
 =head1 SYNOPSIS
 
   my $cpio= Sys::Export::CPIO->new($file_name_or_handle, %attrs);
-  $cpio->append(\%stat_name_and_data);
-  $cpio->append(\%stat_name_and_data);
-  $cpio->append(\%stat_name_and_data);
+  $cpio->add(\%stat_name_and_data);
+  $cpio->add(\%stat_name_and_data);
+  $cpio->add(\%stat_name_and_data);
   ...
   # close the file yourself
 
@@ -28,7 +28,7 @@ little aside from packing the data, but has support for:
 
 =item hardlinks
 
-If you append a file with C<< nlink > 1 >>, it will note the dev/ino and write the data.
+If you add a file with C<< nlink > 1 >>, it will note the dev/ino and write the data.
 If you record a second file also having C<< nlink > 1 >> with the same dev/ino, the size will
 be written as zero and the data will be skipped. (this is the way cpio stores hardlinks)
 
@@ -50,9 +50,7 @@ Pass C<< (virtual_inodes => 0) >> to the constructor to disable this feature.
 
 =back
 
-=head1 CONSTRUCTOR
-
-=head2 new
+=constructor new
 
   my $cpio= Sys::Export::CPIO->new($fh_or_filename, %attrs);
 
@@ -74,9 +72,7 @@ sub new($class, $f, @attrs) {
    $self;
 }
 
-=head1 ATTRIBUTES
-
-=head2 virtual_inodes
+=attribute virtual_inodes
 
 This is enabled by default, and rewrites the device_major/device_minor with zeroes and generates
 a linear sequence for a virtual inode on each file.
@@ -88,11 +84,9 @@ sub virtual_inodes {
    $_[0]{virtual_inodes}
 }
 
-=head1 METHODS
+=method add
 
-=head2 append
-
-  $cpio->append({
+  $cpio->add({
     dev   => # or, ( dev_major =>, dev_minor => )
     ino   => # 
     mode  => #
@@ -110,7 +104,7 @@ data to the stream, padding as necessary.
 
 =cut
 
-sub append($self, $fileinfo) {
+sub add($self, $fileinfo) {
    my ($dev, $dev_major, $dev_minor, $ino, $mode, $nlink, $uid, $gid, $rdev, $rdev_major, $rdev_minor, $mtime, $name)
       = @{$fileinfo}{qw( dev dev_major dev_minor ino mode nlink uid gid rdev rdev_major rdev_minor mtime name )};
    # best-effort to extract major/minor from dev and rdev, unless user specified them
@@ -157,6 +151,22 @@ sub append($self, $fileinfo) {
       if $size;
    $self->{fh}->print("\0"x(4-($size & 3))) || die "write: $!"
       if $size & 3; # pad to multiple of 4
+}
+
+=method finish
+
+No-op.  Provided to fufill the interface for an exporter destination.
+
+=cut
+
+sub finish {
+}
+
+# Avoiding dependency on namespace::clean
+{  no strict 'refs';
+   delete @{"Sys::Export::CPIO::"}{qw(
+      S_IFDIR S_IFMT blessed carp croak
+   )}
 }
 
 1;
