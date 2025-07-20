@@ -4,25 +4,198 @@ package Sys::Export;
 # ABSTRACT: Export a subset of an OS file tree, for chroot/initrd
 
 use v5.36;
+use Carp;
 use Scalar::Util qw( blessed looks_like_number );
-use Exporter 'import';
-our @EXPORT_OK= qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group );
+use Exporter ();
+our @EXPORT_OK= qw(
+   isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter
+   add finish rewrite_path rewrite_user rewrite_group
+);
 our %EXPORT_TAGS= (
+   basic_methods => [qw( exporter add finish rewrite_path rewrite_user rewrite_group )],
    isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group )],
 );
+my ($is_module_name, $require_module);
+
+# optional dependency on Module::Runtime.  This way if there's any bug in my cheap
+# substitute, the fix is to just install the official module.
+if (eval { require Module::Runtime; }) {
+   $is_module_name= \&Module::Runtime::is_module_name;
+   $require_module= \&Module::Runtime::require_module;
+} else {
+   $is_module_name= sub { $_[0] =~ /^[A-Z_a-z][0-9A-Z_a-z]*(?:::[0-9A-Z_a-z]+)*\z/ };
+   $require_module= sub { require( ($_[0] =~ s{::}{/}gr).'.pm' ) };
+}
 
 =head1 SYNOPSIS
 
+  use Sys::Export::CPIO;
+  use Sys::Export -src => '/', -dst => Sys::Export::CPIO->new("initrd.cpio");
+  
+  rewrite_path '/sbin'     => '/bin';
+  rewrite_path '/usr/sbin' => '/bin';
+  rewrite_path '/usr/bin'  => '/bin';
+  
+  add '/bin/busybox';
+  add ...;
+  finish;
+
 =head1 DESCRIPTION
 
-This module is designed to export a subset of a Linux filesystem to a new directory,
+This module is designed to export a subset of an operating system to a new directory,
 automatically detecting and including any libraries or interpreters required by the requested
-subset, and optionally restructuring the directories and updating the copied files to refer
-to the updated paths, when possible.
+subset, and optionally rewriting paths and users/groups and updating the copied files to refer
+to the rewritten paths, when possible.
+
+The actual export implementation is handled by a OS-specific module, like L<Sys::Export::Linux>.
+This top-level module just exports methods.  You can configure a global exporter instance on
+the C<use> line, and then call its methods via exported functions.  For instance,
+
+  use Sys::Export \%options;
+
+is roughly equivalent to:
+
+  BEGIN {
+    if ($^O eq 'linux') {
+      require Sys::Export::Linux;
+      $Sys::Export::exporter= Sys::Export::Linux->new(\%options);
+    } else {
+      ...
+    }
+    sub exporter      { $Sys::Export::exporter }
+    sub add           { $Sys::Export::exporter->add(@_) }
+    sub rewrite_path  { $Sys::Export::exporter->rewrite_path(@_) }
+    sub rewrite_user  { $Sys::Export::exporter->rewrite_user(@_) }
+    sub rewrite_group { $Sys::Export::exporter->rewrite_group(@_) }
+    sub finish        { $Sys::Export::exporter->finish }
+  }
+
+In other words, just a convenience for creating an exporter instance and giving you access to
+most of its important methods without needing to reference the object.  You can skip this
+module entirely and just directly use a C<Sys::Export::Linux> object, if you prefer.
 
 Currently, only Linux is fully supported.
 
+=head1 CONFIGURATION
+
+The following can be passed on the C<use> line to configure a global exporter object:
+
+=over
+
+=item A Hashref
+
+  use Sys::Export { ... };
+
+The keys of the hashref will be passed to the exporter constructor (aside from the key
+C<'type'> which is used to override the default class)
+
+=item -type
+
+Specify a class of exporter, like C<'Linux'> or C<'Sys::Export::Linux'>.  Names without colons
+imply a prefix of C<Sys::Export::>.
+
+=item -src
+
+Source directory; see L<Sys::Export::Unix/src>.
+
+=item -dst
+
+Destination directory or CPIO instance; see L<Sys::Export::Unix/dst>.
+
+=item -src_userdb
+
+Defines UID/GID of source filesystem; see L<Sys::Export::Unix/src_userdb>.
+
+=item -dst_userdb
+
+Defines UID/GID of destination; see L<Sys::Export::Unix/dst_userdb>.
+
+=item -rewrite_path
+
+Hashref of rewrites; see L<Sys::Export::Unix/rewrite_path>.
+
+=item -rewrite_user
+
+Hashref of rewrites; see L<Sys::Export::Unix/rewrite_user>.
+
+=item -rewrite_group
+
+Hashref of rewrites; see L<Sys::Export::Unix/rewrite_group>.
+
+=back
+
+=cut
+
+sub import {
+   my $class= $_[0];
+   my $caller= caller;
+   my %ctor_opts;
+   for (my $i= 1; $i < $#_; ++$i) {
+      if (ref $_[$i] eq 'HASH') {
+         %ctor_opts= ( %ctor_opts, %{ splice(@_, $i, 1) } );
+      }
+      elsif ($_[$i] =~ /^-(type|src|dst|src_userdb|dst_userdb|rewrite_path|rewrite_user|rewrite_group)\z/) {
+         $ctor_opts{$1}= (splice @_, $i, 2)[1];
+      }
+   }
+   if (keys %ctor_opts) {
+      init_global_exporter(%ctor_opts);
+      # caller requested the global exporter instance, so also include the standard methods
+      # unless it looks like they were more selective about what to import.
+      push @_, 'exporter', ':basic_methods'
+         unless grep /^(add|:.*methods)\z/, @_;
+   }
+   goto \&Exporter::import;
+}
+
+our $exporter;
+sub exporter { $exporter }
+
+our %osname_to_class= (
+   linux => 'Linux',
+);
+
+sub init_global_exporter(%config) {
+   my $type= delete $config{type} // $^O;
+   # remap known OS names
+   my $class= $osname_to_class{$type} // $type;
+   # prefix bare names with namespace
+   $class= "Sys::Export::$class" unless $class =~ /::/;
+   $is_module_name->($class) or croak "Invalid module name '$class'";
+   # if it fails, die with 'croak'
+   eval { $require_module->($class) } or croak "$@";
+   # now construct one
+   $exporter= $class->new(%config);
+}
+
 =head1 EXPORTS
+
+=head2 C<:basic_methods> bundle
+
+You get this bundle by default if you configured a global exporter.  The following methods of
+the global exporter object get exported as functions:
+
+=over
+
+=item add
+
+=item finish
+
+=item rewrite_path
+
+=item rewrite_user
+
+=item rewrite_group
+
+=back
+
+=cut
+
+sub add           { $exporter->add(@_) }
+sub finish        { $exporter->finish(@_) }
+sub rewrite_path  { $exporter->rewrite_path(@_) }
+sub rewrite_user  { $exporter->rewrite_user(@_) }
+sub rewrite_group { $exporter->rewrite_group(@_) }
 
 =head2 C<:isa> bundle
 
@@ -56,10 +229,10 @@ Is it an instance of C<Sys::Export::Unix::UserDB::Group>?
 
 =cut
 
-sub isa_exporter :prototype($) { blessed $_[0] && $_[0]->isa('Sys::Export::Unix') }
+sub isa_exporter   :prototype($) { blessed $_[0] && $_[0]->isa('Sys::Export::Exporter') }
 sub isa_export_dst :prototype($) { blessed $_[0] && $_[0]->can('add') && $_[0]->can('finish') }
-sub isa_userdb :prototype($) { blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
-sub isa_user  :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
-sub isa_group :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
+sub isa_userdb     :prototype($) { blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
+sub isa_user       :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
+sub isa_group      :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
 
 1;

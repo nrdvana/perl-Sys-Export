@@ -116,6 +116,7 @@ use Scalar::Util qw( blessed looks_like_number );
 use Sys::Export qw( :isa );
 use File::Temp ();
 use POSIX ();
+our @ISA= qw( Sys::Export::Exporter );
 our $have_file_map= eval { require File::Map; };
 our $have_unix_mknod= eval { require Unix::Mknod; };
 my sub isa_hash   :prototype($) { ref $_[0] eq 'HASH' }
