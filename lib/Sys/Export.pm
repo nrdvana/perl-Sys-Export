@@ -172,6 +172,17 @@ sub init_global_exporter(%config) {
 
 =head1 EXPORTS
 
+=head2 exporter
+
+A function to access C<$Sys::Exporter::exporter>
+
+=head2 init_global_exporter
+
+  init_global_exporter(\%config);
+
+A function to initialize C<$Sys::Exporter::exporter>, which also handles autoselecting the
+type of the exporter.
+
 =head2 C<:basic_methods> bundle
 
 You get this bundle by default if you configured a global exporter.  The following methods of

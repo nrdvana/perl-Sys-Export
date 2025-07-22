@@ -58,7 +58,7 @@ sub add_passwd($self, %options) {
       $db= Sys::Export::Unix::UserDB->new(
          auto_import => ($self->{src_userdb} //= $self->_build_src_userdb),
       );
-      $db->group($_) for keys $self->dst_gid_used->%*
+      $db->group($_) for keys $self->dst_gid_used->%*;
       $db->user($_) for keys $self->dst_uid_used->%*;
    };
    $db->save($self);
