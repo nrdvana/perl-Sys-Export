@@ -1,7 +1,7 @@
 package Sys::Export::Exporter;
 
 # VERSION
-# ABSTRACT: base class for exporters
+# ABSTRACT: base class for exporters, only used for 'isa' checks
 1;
 __END__
 

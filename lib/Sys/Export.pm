@@ -132,10 +132,10 @@ sub import {
    my %ctor_opts;
    for (my $i= 1; $i < $#_; ++$i) {
       if (ref $_[$i] eq 'HASH') {
-         %ctor_opts= ( %ctor_opts, %{ splice(@_, $i, 1) } );
+         %ctor_opts= ( %ctor_opts, %{ splice(@_, $i--, 1) } );
       }
       elsif ($_[$i] =~ /^-(type|src|dst|src_userdb|dst_userdb|rewrite_path|rewrite_user|rewrite_group)\z/) {
-         $ctor_opts{$1}= (splice @_, $i, 2)[1];
+         $ctor_opts{$1}= (splice @_, $i--, 2)[1];
       }
    }
    if (keys %ctor_opts) {
@@ -229,8 +229,8 @@ Is it an instance of C<Sys::Export::Unix::UserDB::Group>?
 
 =cut
 
-sub isa_exporter   :prototype($) { blessed $_[0] && $_[0]->isa('Sys::Export::Exporter') }
-sub isa_export_dst :prototype($) { blessed $_[0] && $_[0]->can('add') && $_[0]->can('finish') }
+sub isa_exporter   :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Exporter') }
+sub isa_export_dst :prototype($) { blessed($_[0]) && $_[0]->can('add') && $_[0]->can('finish') }
 sub isa_userdb     :prototype($) { blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
 sub isa_user       :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
 sub isa_group      :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }

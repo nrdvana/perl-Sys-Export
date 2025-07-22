@@ -116,6 +116,7 @@ use Scalar::Util qw( blessed looks_like_number );
 use Sys::Export qw( :isa );
 use File::Temp ();
 use POSIX ();
+require Sys::Export::Exporter;
 our @ISA= qw( Sys::Export::Exporter );
 our $have_file_map= eval { require File::Map; };
 our $have_unix_mknod= eval { require Unix::Mknod; };
@@ -629,7 +630,7 @@ sub add {
          my $dst_parent= $file{name} =~ s,/?[^/]+$,,r;
          if (length $dst_parent && !exists $self->{dst_path_set}{$dst_parent}) {
             # if writing to a real dir, check whether it already exists by some other means
-            if (ref $self->dst ne 'CODE' && -d $self->dst_abs . $dst_parent) {
+            if (!isa_export_dst $self->dst && -d $self->dst_abs . $dst_parent) {
                # no need to do anything, but record that we have it
                $self->{dst_path_set}{$dst_parent}= undef;
             }
@@ -734,11 +735,14 @@ to directories since writing the contents of the directory would have changed th
 =cut
 
 sub finish($self) {
-   if ($self->{_delayed_apply_stat}) {
+   if (isa_export_dst $self->dst) {
+      $self->dst->finish;
+   }
+   elsif (my $todo= delete $self->{_delayed_apply_stat}) {
       # Reverse sort causes child directories to be updated before parents,
       # which is required for updating mtimes.
       $self->_delayed_apply_stat(@$_)
-         for sort { $b->[0] cmp $a->[0] } @{$self->{_delayed_apply_stat}};
+         for sort { $b->[0] cmp $a->[0] } @$todo;
    }
 }
 
@@ -856,13 +860,13 @@ sub _export_file($self, $file) {
       $self->_export_script_file($file, \@notes);
    }
    # If writing to an API, load the file data
-   if (ref($self->dst) eq 'CODE') {
+   if (isa_export_dst $self->dst) {
       # reload temp file if one was used
       if (!exists $file->{data}) {
          _load_or_map_data($file->{data}, $file->{data_path});
       }
       $self->_log_action("CPY", $file->{src_path} // '(data)', $file->{name}, @notes);
-      $self->dst->($self, $file);
+      $self->dst->add($file);
    }
    # else if building a staging directory of files, write data to a file
    else {
@@ -990,8 +994,8 @@ sub _rewrite_shell($self, $contents) {
 
 sub _export_dir($self, $dir) {
    $self->_log_action('DIR', $dir->{src_path} // '(default)', $dir->{name});
-   if (ref $self->dst eq 'CODE') {
-      $self->dst->($self, $dir);
+   if (isa_export_dst $self->dst) {
+      $self->dst->add($dir);
    } else {
       my $dst_abs= $self->dst_abs . $dir->{name};
       mkdir($dst_abs)
@@ -1062,8 +1066,8 @@ sub _export_symlink($self, $file) {
    }
 
    $self->_log_action('SYM', $file->{data}, $file->{name});
-   if (ref($self->dst) eq 'CODE') {
-      $self->dst->($self, $file);
+   if (isa_export_dst $self->dst) {
+      $self->dst->add($self, $file);
    } else {
       my $dst_abs= $self->dst_abs . $file->{name};
       symlink($file->{data}, $dst_abs)
@@ -1075,7 +1079,7 @@ sub _export_symlink($self, $file) {
 sub _export_devnode($self, $file) {
    my ($major,$minor)= _dev_major_minor($file->{rdev});
    $self->_log_action(S_ISBLK($file->{mode})? 'BLK' : 'CHR', "$major:$minor", $file->{name});
-   if (ref $self->dst eq 'CODE') {
+   if (isa_export_dst $self->dst) {
       $file->{rdev_major} //= $major;
       $file->{rdev_minor} //= $minor;
       $self->dst->($self, $file);
@@ -1088,8 +1092,8 @@ sub _export_devnode($self, $file) {
 
 sub _export_fifo($self, $file) {
    $self->_log_action("FIO", "(fifo)", $file->{name});
-   if (ref $self->dst eq 'CODE') {
-      $self->dst->($self, $file);
+   if (isa_export_dst $self->dst) {
+      $self->dst->add($self, $file);
    } else {
       require POSIX;
       my $dst_abs= $self->dst_abs . $file->{name};
