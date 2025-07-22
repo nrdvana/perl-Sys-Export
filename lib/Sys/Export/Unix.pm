@@ -105,7 +105,9 @@ copied and whether they were patched.
 
 =cut
 
-use v5.36;
+use v5.26;
+use warnings;
+use experimental qw( signatures );
 use Carp qw( croak carp );
 use Cwd qw( abs_path );
 use Fcntl qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT 

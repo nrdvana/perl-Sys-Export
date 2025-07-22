@@ -21,7 +21,9 @@ See C<Sys::Export::Unix> for the list of core attributes and methods.
 
 =cut
 
-use v5.36;
+use v5.26;
+use warnings;
+use experimental qw( signatures );
 use parent 'Sys::Export::Unix';
 
 =method add_passwd

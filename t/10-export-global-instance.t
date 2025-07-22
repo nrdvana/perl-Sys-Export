@@ -1,6 +1,8 @@
-use v5.36;
+use v5.26;
+use warnings;
 use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
 use Test2AndUtils;
+use experimental qw( signatures );
 
 package Sys::Export::MockDst {
    sub new($class) { bless { method_calls => [] }, $class }
@@ -11,13 +13,13 @@ package Sys::Export::MockDst {
 
 my $src= __FILE__ =~ s,[^\\/]+$,,r;
 my $dst= Sys::Export::MockDst->new;
-ok( eval <<'PL', 'example script' ) or diag $@;
+ok( eval <<~'PL', 'example script' ) or diag $@;
    use Sys::Export -type => 'Unix', -src => $src, -dst => $dst;
    add '10-export-global-instance.t';
    add 'lib/Test2AndUtils.pm';
    finish;
    1;
-PL
+   PL
 
 is($dst->method_calls,
    [ [ add => hash { field name => '10-export-global-instance.t'; etc; } ],

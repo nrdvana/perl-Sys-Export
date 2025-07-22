@@ -67,7 +67,9 @@ written to it:
 
 =cut
 
-use v5.36;
+use v5.26;
+use warnings;
+use experimental qw( signatures );
 use Carp qw( croak carp );
 our @CARP_NOT= qw( Sys::Export::Unix );
 use Cwd qw( abs_path );

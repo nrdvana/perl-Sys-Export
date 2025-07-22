@@ -1,6 +1,8 @@
-use v5.36;
+use v5.26;
+use warnings;
 use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
 use Test2AndUtils;
+use experimental qw( signatures );
 my $tmp = File::Temp->newdir;
 
 use Sys::Export::Unix::UserDB;

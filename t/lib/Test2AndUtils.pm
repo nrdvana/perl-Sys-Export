@@ -1,7 +1,9 @@
 package Test2AndUtils;
-use v5.36;
+use v5.26;
+use warnings;
 use Test2::V0 '!subtest';
 use Test2::Tools::Subtest 'subtest_streamed';
+use experimental qw( signatures );
 use parent 'Test2::V0';
 use File::Temp;
 use IO::Handle;

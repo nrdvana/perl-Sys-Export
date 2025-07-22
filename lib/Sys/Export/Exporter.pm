@@ -2,6 +2,10 @@ package Sys::Export::Exporter;
 
 # VERSION
 # ABSTRACT: base class for exporters, only used for 'isa' checks
+
+use v5.26;
+use warnings;
+
 1;
 __END__
 

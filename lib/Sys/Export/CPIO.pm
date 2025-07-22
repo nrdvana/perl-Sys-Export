@@ -3,7 +3,9 @@ package Sys::Export::CPIO;
 # ABSTRACT: Write CPIO archives needed for Linux initrd
 # VERSION
 
-use v5.36;
+use v5.26;
+use warnings;
+use experimental qw( signatures );
 use Fcntl qw( S_IFDIR S_IFMT );
 use Scalar::Util 'blessed';
 use Carp;

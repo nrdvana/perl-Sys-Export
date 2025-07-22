@@ -1,6 +1,8 @@
-use v5.36;
+use v5.26;
+use warnings;
 use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
 use Test2AndUtils;
+use experimental qw( signatures );
 use Cwd 'getcwd';
 
 # Docker access is equivalent to root access, so not enabled by default
@@ -38,24 +40,25 @@ if ($ENV{DOCKER_TEST_IMAGE_NAME}) {
 mkdir "$tmp/tmp";
 mkdir "$tmp/initrd";
 my $gid= $(+0;
-mkfile("$tmp/export.pl", <<END_PL, 0755);
-#! /usr/bin/perl
-use v5.36;
-use FindBin;
-use lib "/opt/sys-export/lib";
-use Sys::Export::Unix;
-{
-   my \$exporter= Sys::Export::Unix->new(src => '/', dst => "/export", tmp => "\$FindBin::Bin/tmp");
-   \$exporter->rewrite_path("/", "$tmp/initrd/");
-   \$exporter->add('bin/busybox');
-}
-END {
-   # This is running as root inside the container.
-   # Make sure we can delete these files from outside docker.
-   system("chgrp -R $gid \$FindBin::Bin/initrd");
-   system("chmod -R g+w \$FindBin::Bin/initrd");
-}
-END_PL
+mkfile("$tmp/export.pl", <<~END_PL, 0755);
+   #! /usr/bin/perl
+   use v5.26;
+   use warnings;
+   use FindBin;
+   use lib "/opt/sys-export/lib";
+   use Sys::Export::Unix;
+   {
+      my \$exporter= Sys::Export::Unix->new(src => '/', dst => "/export", tmp => "\$FindBin::Bin/tmp");
+      \$exporter->rewrite_path("/", "$tmp/initrd/");
+      \$exporter->add('bin/busybox');
+   }
+   END {
+      # This is running as root inside the container.
+      # Make sure we can delete these files from outside docker.
+      system("chgrp -R $gid \$FindBin::Bin/initrd");
+      system("chmod -R g+w \$FindBin::Bin/initrd");
+   }
+   END_PL
 
 # Launch docker with volume at identical path of $tmp
 is( system(qw( docker run --init --rm -w / ),

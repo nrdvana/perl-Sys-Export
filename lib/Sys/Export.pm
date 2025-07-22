@@ -3,7 +3,9 @@ package Sys::Export;
 # VERSION
 # ABSTRACT: Export a subset of an OS file tree, for chroot/initrd
 
-use v5.36;
+use v5.26;
+use warnings;
+use experimental qw( signatures );
 use Carp;
 use Scalar::Util qw( blessed looks_like_number );
 use Exporter ();

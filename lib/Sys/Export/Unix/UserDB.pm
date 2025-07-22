@@ -2,8 +2,9 @@ package Sys::Export::Unix::UserDB;
 # ABSTRACT: Abstractions for Unix passwd/group/shadow files
 # VERSION
 
-use v5.36;
+use v5.26;
 use warnings;
+use experimental qw( signatures );
 use Carp ();
 use File::Spec::Functions qw( catfile );
 use Storable qw( dclone );
@@ -816,7 +817,9 @@ Days after max when user can still log in and immediately change password
 =cut
 
 package Sys::Export::Unix::UserDB::User {
-   use v5.36;
+   use v5.26;
+   use warnings;
+   use experimental qw( signatures );
    our @CARP_NOT= qw( Sys::Export::Unix::UserDB );
    our %known_attrs= map +($_ => 1), qw( name uid passwd group groups comment gecos dir shell
       quota pw_change_time pw_min_days pw_max_days pw_warn_days pw_inactive_days expire_time );
@@ -945,7 +948,9 @@ Group password, which should never be used anyway.  Leave this C<undef> or C<'*'
 =cut
 
 package Sys::Export::Unix::UserDB::Group {
-   use v5.36;
+   use v5.26;
+   use warnings;
+   use experimental qw( signatures );
    our @CARP_NOT= qw( Sys::Export::Unix::UserDB );
    our %known_attrs= map +($_ => 1), qw( name gid passwd );
 

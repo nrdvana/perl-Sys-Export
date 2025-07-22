@@ -14,7 +14,9 @@ file (via L<File::Map>) and actually avoid mapping the whole file.
 
 =cut
 
-use v5.36;
+use v5.26;
+use warnings;
+use experimental qw( signatures );
 use Carp;
 use Scalar::Util 'dualvar';
 

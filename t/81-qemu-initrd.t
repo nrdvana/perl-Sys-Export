@@ -1,6 +1,8 @@
-use v5.36;
+use v5.26;
+use warnings;
 use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
 use Test2AndUtils;
+use experimental qw( signatures );
 use Cwd 'abs_path';
 
 =head1 DESCRIPTION
@@ -52,35 +54,35 @@ if ($ENV{DOCKER_TEST_IMAGE_NAME}) {
 }
 
 my ($uid, $gid)= ($<, $(+0);
-mkfile("$tmp/export.pl", <<END_PL, 0755);
-#! /usr/bin/perl
-use v5.36;
-use FindBin;
-use lib "/opt/sys-export/lib";
-use Sys::Export::Unix;
-use Sys::Export::CPIO;
-{
-   my \$cpio= Sys::Export::CPIO->new("/opt/export/initrd.cpio");
-   chown $uid, $gid, "/opt/export/initrd.cpio";
-   my \$exporter= Sys::Export::Unix->new(src => '/', dst => \$cpio);
-   \$exporter->add(
-      'proc', 'sys', 'dev', 'tmp', 'run', 'var', 'usr',
-      'bin/busybox', 'bin/sh', 'bin/date', 'bin/cat', 'bin/mount',
-      [ file755 => '0:0', 'init', data_path => "/opt/export/init.sh" ],
-   );
-}
-exit 0;
-END_PL
+mkfile("$tmp/export.pl", <<~END_PL, 0755);
+   #! /usr/bin/perl
+   use v5.36;
+   use FindBin;
+   use lib "/opt/sys-export/lib";
+   use Sys::Export::Unix;
+   use Sys::Export::CPIO;
+   {
+      my \$cpio= Sys::Export::CPIO->new("/opt/export/initrd.cpio");
+      chown $uid, $gid, "/opt/export/initrd.cpio";
+      my \$exporter= Sys::Export::Unix->new(src => '/', dst => \$cpio);
+      \$exporter->add(
+         'proc', 'sys', 'dev', 'tmp', 'run', 'var', 'usr',
+         'bin/busybox', 'bin/sh', 'bin/date', 'bin/cat', 'bin/mount',
+         [ file755 => '0:0', 'init', data_path => "/opt/export/init.sh" ],
+      );
+   }
+   exit 0;
+   END_PL
 
-mkfile("$tmp/init.sh", <<'END_SH', 0755);
-#! /bin/sh
-mount -t devtmpfs dev /dev
-mount -t proc proc /proc
-mount -t sysfs sys /sys
-echo "Init Script Started"
-echo $PATH
-date
-END_SH
+mkfile("$tmp/init.sh", <<~'END_SH', 0755);
+   #! /bin/sh
+   mount -t devtmpfs dev /dev
+   mount -t proc proc /proc
+   mount -t sysfs sys /sys
+   echo "Init Script Started"
+   echo $PATH
+   date
+   END_SH
 
 # Launch docker with source code at /opt/sys-export and tmp dir at /opt/export/
 @cmd= (qw( docker run --init --rm -w / ),
