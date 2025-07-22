@@ -74,13 +74,11 @@ destination filesystem.  See L</USER REMAPPING> for more details.
 
 =item tmp
 
-A temporary directory in the same filesystem as L</dst> where this module can prepare temporary
-files, then C<rename> them into place.  This prevents any partially-prepared files from ending
-up in the destination tree.  If you specify this, it is your responsibility to clean it up,
-such as by passing an instance of C<< File::Temp->newdir >>.
+A temporary directory where this module can prepare temporary files.  If you are using a
+filesystem destination, it will default to the same device as the staging directory.
 
-By default, this module uses the normaal File::Temp location, unless that path is not on the
-same volume as the destination, in which case it will create a temp directory within C<$dst>.
+When L<finish> is called, this is et to C<undef> so that instance of File::Temp can clean
+themselves up.
 
 =item on_collision
 
@@ -136,25 +134,25 @@ sub new {
    $attrs{src_abs}= $abs_src eq '/'? $abs_src : "$abs_src/";
 
    defined $attrs{dst} or croak "Require 'dst' attribute";
-   unless (isa_export_dst $attrs{dst}) {
+   if (isa_export_dst $attrs{dst}) {
+      $attrs{_dst}= $attrs{dst};
+   } else {
       my $dst_abs= abs_path($attrs{dst} =~ s,(?<=[^/])$,/,r)
          or croak "dst directory '$attrs{dst}' does not exist";
       length $dst_abs > 1
          or croak "cowardly refusing to export to '$dst_abs'";
-      $attrs{dst_abs}= "$dst_abs/";
+      require Sys::Export::Unix::WriteFS;
+      $attrs{_dst}= Sys::Export::Unix::WriteFS->new(
+         dst          => $attrs{dst},
+         tmp          => $attrs{tmp},
+         on_collision => $attrs{on_collision},
+      );
    }
-
-   $attrs{tmp} //= do {
-      my $tmp= File::Temp->newdir;
-      unless (isa_export_dst $attrs{dst}) {
-         # Make sure can rename() from this $tmp to $dst
-         my ($tmp_dev)= stat "$tmp/";
-         my ($dst_dev)= stat $attrs{dst};
-         $tmp= File::Temp->newdir(DIR => $attrs{dst})
-            if $tmp_dev != $dst_dev;
-      }
-      $tmp;
-   };
+   # default tmp dir to whatever dst chose, if it has a preference
+   $attrs{tmp} //= $attrs{_dst}->tmp
+      if $attrs{_dst}->can('tmp');
+   # otherwise use system tmp dir
+   $attrs{tmp} //= File::Temp->newdir;
 
    my $self= bless \%attrs, $class;
 
@@ -233,8 +231,9 @@ The set of numeric group IDs which have been written to dst.
 
 sub src($self)          { $self->{src} }
 sub src_abs($self)      { $self->{src_abs} }
-sub dst($self)          { $self->{dst} }
-sub dst_abs($self)      { $self->{dst_abs} }
+sub dst($self)          { $self->{dst} }  # sometimes a path string
+sub _dst($self)         { $self->{_dst} } # always an object
+sub dst_abs($self)      { $self->{_dst}->can('dst_abs')? $self->{_dst}->dst_abs : undef }
 sub tmp($self)          { $self->{tmp} }
 sub src_path_set($self) { $self->{src_path_set} //= {} }
 sub dst_path_set($self) { $self->{dst_path_set} //= {} }
@@ -497,8 +496,8 @@ sub _build_dst_userdb($self) {
    my $udb= Sys::Export::Unix::UserDB->new(
       auto_import => ($self->{src_userdb} //= $self->_build_src_userdb)
    );
-   $udb->load($self->dst_abs . 'etc')
-      if defined $self->dst_abs && -f $self->dst_abs . 'etc/passwd';
+   $udb->load($self->_dst->dst_abs . 'etc')
+      if defined $self->_dst->can('dst_abs') && -f $self->_dst->dst_abs . 'etc/passwd';
    # make sure the rewrite hashes exist, used as a flag that rerites need to occur.
    $self->{_user_rewrite_map} //= {};
    $self->{_group_rewrite_map} //= {};
@@ -611,18 +610,27 @@ sub add {
       ++$self->{dst_gid_used}{$file{gid}} if defined $file{gid};
 
       # Has this destination already been written?
-      if (defined(my $orig= $self->{dst_path_set}{$file{name}})) {
-         if (!$self->on_collision) {
-            croak "Already wrote a file '$file{name}'".(length $orig? " which came from $orig":"");
-         } elsif ($self->on_collision eq 'ignore') {
-            $self->{_log_debug}->("Already exported to '$file{name}' previously from '$orig'") if $self->{_log_debug};
-            next;
-         } elsif ($self->on_collision eq 'overwrite') {
-            $self->{_log_debug}->("Overwriting '$file{name}'") if $self->{_log_debug};
-            unlink $self->dst_abs . $file{name}
-               if defined $self->dst_abs;
-         } else {
-            $self->on_collision->($self, \%file, $orig);
+      if (exists $self->{dst_path_set}{$file{name}}) {
+         my $orig= $self->{dst_path_set}{$file{name}};
+         # If the destination is ::WriteFS, let it handle the collision below
+         unless ($self->_dst->can('dst_abs')) {
+            my $action= $self->on_collision // 'ignore_if_same';
+            $action= $action->($file{name}, \%file)
+               if ref $action eq 'CODE';
+            if ($action eq 'ignore_if_same') {
+               $action= ($file{src_path}//'') eq $orig? 'ignore' : 'croak';
+            }
+            if ($action eq 'ignore') {
+               $self->{_log_debug}->("Already exported to '$file{name}' previously from '$orig'") if $self->{_log_debug};
+               next;
+            } elsif ($action eq 'overwrite') {
+               $self->{_log_debug}->("Overwriting '$file{name}'") if $self->{_log_debug};
+               # let dst handle overwrite...
+            } elsif ($action eq 'croak') {
+               croak "Already exported '$file{name}'".(length $orig? " which came from $orig":"");
+            } else {
+               croak "unhandled on_collision action '$action'";
+            }
          }
       }
       # Else make sure the parent directory *has* been written
@@ -630,7 +638,7 @@ sub add {
          my $dst_parent= $file{name} =~ s,/?[^/]+$,,r;
          if (length $dst_parent && !exists $self->{dst_path_set}{$dst_parent}) {
             # if writing to a real dir, check whether it already exists by some other means
-            if (!isa_export_dst $self->dst && -d $self->dst_abs . $dst_parent) {
+            if ($self->_dst->can('dst_abs') && -d $self->_dst->dst_abs . $dst_parent) {
                # no need to do anything, but record that we have it
                $self->{dst_path_set}{$dst_parent}= undef;
             }
@@ -687,12 +695,9 @@ our %_mode_alias= (
    fifo => S_IFIFO,
    sock => S_IFSOCK,
 );
-sub _looks_like_integer {
-   Scalar::Util::looks_like_number($_[0]) && int($_[0]) == $_[0];
-}
 sub _attrs_from_array_notation {
    my ($mode, $owner, $name)= (shift, shift, shift);
-   unless (_looks_like_integer($mode)) {
+   unless (isa_int $mode) {
       $mode =~ /^(file|dir|sym|blk|chr|fifo|sock)(\d+)?\z/
          or croak "Invalid mode '$mode': expected number, or prefix file/dir/sym/blk/chr/fifo/sock followed by octal permissions";
       $mode= $_mode_alias{$1};
@@ -700,8 +705,8 @@ sub _attrs_from_array_notation {
    }
    my %attrs= ( name => $name, mode => $mode );
    my ($user,$group)= !defined $owner? (0,0) : split /:/, $owner;
-   $attrs{ _looks_like_integer($user)?  'uid' : 'user'  }= $user;
-   $attrs{ _looks_like_integer($group)? 'gid' : 'group' }= $group;
+   $attrs{ isa_int($user)?  'uid' : 'user'  }= $user;
+   $attrs{ isa_int($group)? 'gid' : 'group' }= $group;
    if (($mode & S_IFMT) == S_IFBLK || ($mode & S_IFMT) == S_IFCHR) {
       @attrs{'major','minor'}= (shift, shift);
    }
@@ -735,15 +740,8 @@ to directories since writing the contents of the directory would have changed th
 =cut
 
 sub finish($self) {
-   if (isa_export_dst $self->dst) {
-      $self->dst->finish;
-   }
-   elsif (my $todo= delete $self->{_delayed_apply_stat}) {
-      # Reverse sort causes child directories to be updated before parents,
-      # which is required for updating mtimes.
-      $self->_delayed_apply_stat(@$_)
-         for sort { $b->[0] cmp $a->[0] } @$todo;
-   }
+   $self->_dst->finish;
+   undef $self->{tmp}; # allow File::Temp to free tmp dir
 }
 
 =method get_dst_for_src
@@ -816,74 +814,40 @@ sub get_dst_uid_gid($self, $uid, $gid, $context='') {
    return ($uid, $gid);
 }
 
-sub _syswrite_all($tmp, $content_ref) {
-   my $ofs= 0;
-   again:
-   my $wrote= $tmp->syswrite($$content_ref, length($$content_ref) - $ofs, $ofs);
-   if ($ofs+$wrote != length $$content_ref) {
-      if ($wrote > 0) { $ofs += $wrote; goto again; }
-      elsif ($!{EAGAIN} || $!{EINTR}) { goto again; }
-      else { die "syswrite($tmp): $!" }
-   }
-   $tmp->close or die "close($tmp): $!";
-}
-
 sub _export_file($self, $file) {
    # If the file has a link count > 1, check to see if we already have it in the destination
-   if ($file->{nlink} > 1) {
-      if (my $already= $self->_link_map->{"$file->{dev}:$file->{ino}"}) {
-         $self->{_log_debug}->("Already exported inode $file->{dev}:$file->{ino} as '$already'")
+   my $prev;
+   if ($file->{nlink} > 1 && defined $file->{data_path}) {
+      if (defined($prev= $self->_link_map->{"$file->{dev}:$file->{ino}"})) {
+         $self->{_log_debug}->("Already exported inode $file->{dev}:$file->{ino} as '$prev'")
             if $self->{_log_debug};
-         # Yep, make a link of that file instead of copying again
-         $self->_log_action("LNK", $already, $file->{name});
-         if (ref $self->dst eq 'CODE') { # CPIO stream
-            $self->dst->($self, $file);
-         } else {
-            my $dst= $self->dst_abs . $file->{name};
-            link($already, $dst)
-               or croak "link($already, $dst): $!";
-         }
-         return;
+         # make a link of that file instead of copying again
+         $self->_log_action("LNK", $prev, $file->{name});
+         # ensure the dst realizes it is a symlink by sending it without data
+         delete $file->{data};
+         delete $file->{data_path};
+      }
+      else {
+         $self->_link_map->{"$file->{dev}:$file->{ino}"}= $file->{name};
       }
    }
-   # Load the data, unless already provided
-   unless (exists $file->{data}) {
-      defined $file->{data_path}
-         or croak "For regular files, must specify ->{data} or ->{data_path}";
-      _load_or_map_file($file->{data}, $file->{data_path});
-   }
-   my @notes;
-   # Check for ELF signature
-   if (substr($file->{data}, 0, 4) eq "\x7fELF") {
-      $self->_export_elf_file($file, \@notes);
-   } elsif ($file->{data} =~ m,^#!\s*/,) {
-      $self->_export_script_file($file, \@notes);
-   }
-   # If writing to an API, load the file data
-   if (isa_export_dst $self->dst) {
-      # reload temp file if one was used
-      if (!exists $file->{data}) {
-         _load_or_map_data($file->{data}, $file->{data_path});
+   if (!defined $prev) {
+      # Load the data, unless already provided
+      unless (exists $file->{data}) {
+         defined $file->{data_path}
+            or croak "For regular files, must specify ->{data} or ->{data_path}";
+         _load_or_map_file($file->{data}, $file->{data_path});
+      }
+      my @notes;
+      # Check for ELF signature
+      if (substr($file->{data}, 0, 4) eq "\x7fELF") {
+         $self->_export_elf_file($file, \@notes);
+      } elsif ($file->{data} =~ m,^#!\s*/,) {
+         $self->_export_script_file($file, \@notes);
       }
       $self->_log_action("CPY", $file->{src_path} // '(data)', $file->{name}, @notes);
-      $self->dst->add($file);
    }
-   # else if building a staging directory of files, write data to a file
-   else {
-      # If a temp file was not used, create it now
-      my $tmp= $file->{data_path};
-      unless ($tmp && substr($tmp, 0, length $self->tmp) eq $self->tmp) {
-         $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
-         _syswrite_all($tmp, \$file->{data});
-      }
-      # Apply matching permissions and ownership
-      $self->_apply_stat("$tmp", $file);
-      # Rename the temp file into place
-      $self->_log_action("CPY", $file->{src_path} // '(data)', $file->{name}, @notes);
-      my $dst= $self->dst_abs . $file->{name};
-      rename($tmp, $dst)
-         or croak "rename($tmp, $dst): $!";
-   }
+   $self->_dst->add($file);
 }
 
 sub _resolve_src_library($self, $libname, $rpath) {
@@ -994,14 +958,7 @@ sub _rewrite_shell($self, $contents) {
 
 sub _export_dir($self, $dir) {
    $self->_log_action('DIR', $dir->{src_path} // '(default)', $dir->{name});
-   if (isa_export_dst $self->dst) {
-      $self->dst->add($dir);
-   } else {
-      my $dst_abs= $self->dst_abs . $dir->{name};
-      mkdir($dst_abs)
-         or croak "mkdir($dst_abs): $!";
-      $self->_apply_stat($dst_abs, $dir);
-   }
+   $self->_dst->add($dir);
 }
 
 sub _export_symlink($self, $file) {
@@ -1066,96 +1023,22 @@ sub _export_symlink($self, $file) {
    }
 
    $self->_log_action('SYM', $file->{data}, $file->{name});
-   if (isa_export_dst $self->dst) {
-      $self->dst->add($self, $file);
-   } else {
-      my $dst_abs= $self->dst_abs . $file->{name};
-      symlink($file->{data}, $dst_abs)
-         or croak "symlink($file->{data}, $dst_abs): $!";
-      $self->_apply_stat($dst_abs, $file);
-   }
+   $self->_dst->add($file);
 }
 
 sub _export_devnode($self, $file) {
-   my ($major,$minor)= _dev_major_minor($file->{rdev});
-   $self->_log_action(S_ISBLK($file->{mode})? 'BLK' : 'CHR', "$major:$minor", $file->{name});
-   if (isa_export_dst $self->dst) {
+   if (defined $file->{rdev} && (!defined $file->{rdev_major} || !defined $file->{rdev_minor})) {
+      my ($major,$minor)= Sys::Export::Unix::_dev_major_minor($file->{rdev});
       $file->{rdev_major} //= $major;
       $file->{rdev_minor} //= $minor;
-      $self->dst->($self, $file);
-   } else {
-      my $dst_abs= $self->dst_abs . $file->{name};
-      _mknod_or_die($dst_abs, $file->{mode}, $file->{rdev});
-      $self->_apply_stat($dst_abs, $file);
    }
+   $self->_log_action(S_ISBLK($file->{mode})? 'BLK' : 'CHR', "$file->{rdev_major}:$file->{rdev_minor}", $file->{name});
+   $self->_dst->($file);
 }
 
 sub _export_fifo($self, $file) {
    $self->_log_action("FIO", "(fifo)", $file->{name});
-   if (isa_export_dst $self->dst) {
-      $self->dst->add($self, $file);
-   } else {
-      require POSIX;
-      my $dst_abs= $self->dst_abs . $file->{name};
-      POSIX::mkfifo($dst_abs, $file->{mode})
-         or croak "mkfifo($dst_abs): $!";
-      $self->_apply_stat($dst_abs, $file);
-   }
-}
-
-# Apply permissions and mtime to a path
-sub _apply_stat($self, $abs_path, $stat) {
-   my ($mode, $uid, $gid, $atime, $mtime)= (lstat $abs_path)[2,4,5,8,9];
-   my $change_uid= defined $stat->{uid} && $stat->{uid} != $uid;
-   my $change_gid= defined $stat->{gid} && $stat->{gid} != $gid;
-   if ($change_uid || $change_gid) {
-      # only UID 0 can change UID, and only GID 0 or GID in supplemental groups can change GID.
-      $uid= -1 unless $change_uid && $> == 0;
-      $gid= -1 unless $change_gid && ($) == 0 || grep $stat->{gid}, split / /, $) );
-      # Only attempt change if able
-      POSIX::lchown($uid, $gid, $abs_path) or croak "lchown($uid, $gid, $abs_path): $!"
-         if $uid >= 0 || $gid >= 0;
-   }
-
-   my @delayed;
-
-   # Don't change permission bits on symlinks
-   if (!S_ISLNK($mode) && ($mode & 0xFFF) != ($stat->{mode} & 0xFFF)) {
-      # If changing permissions on a directory to something that removes our ability
-      # to write to it, delay this change until the end.
-      if (S_ISDIR($mode) && !(($stat->{mode} & 0222) && ($stat->{mode} & 0111))) {
-         push @delayed, 'chmod';
-      }
-      else {
-         chmod $stat->{mode}&0xFFF, $abs_path
-            or croak sprintf "chmod(0%o, %s): $!", $stat->{mode}&0xFFF, $abs_path;
-      }
-   }
-
-   if (!S_ISLNK($mode) && (defined $stat->{mtime} || defined $stat->{atime})) {
-      if (S_ISDIR($mode)) {
-         # No point in applying mtime to a directory now, because it will get
-         # changed when sub-entries get written.
-         push @delayed, 'utime';
-      }
-      else {
-         utime $stat->{atime}, $stat->{mtime}, $abs_path
-            or warn "utime($abs_path): $!";
-      }
-   }
-
-   push @{$self->{_delayed_apply_stat}}, [ $abs_path, $stat, @delayed ]
-      if @delayed;
-}
-sub _delayed_apply_stat($self, $abs_path, $stat, @delayed) {
-   if (grep $_ eq 'chmod', @delayed) {
-      chmod $stat->{mode}&0xFFF, $abs_path
-         or croak sprintf "chmod(0%o, %s): $!", $stat->{mode}&0xFFF, $abs_path;
-   }
-   if (grep $_ eq 'utime', @delayed) {
-      utime $stat->{atime}, $stat->{mtime}, $abs_path
-         or warn "utime($abs_path): $!";
-   }
+   $self->_dst->add($file);
 }
 
 # _load_file(my $buffer, $filenme)
@@ -1166,27 +1049,50 @@ sub _load_file {
    sysread($fh, ($_[0] //= ''), $size) == $size
       or die "sysread($_[1], $size): $!";
 }
-*_load_or_map_file= $have_file_map? sub { File::Map::map_file($_[0], $_[1], "<") }
-   : *_load_file;
+
+sub _syswrite_all($tmp, $content_ref) {
+   my $ofs= 0;
+   again:
+   my $wrote= $tmp->syswrite($$content_ref, length($$content_ref) - $ofs, $ofs);
+   if ($ofs+$wrote != length $$content_ref) {
+      if ($wrote > 0) { $ofs += $wrote; goto again; }
+      elsif ($!{EAGAIN} || $!{EINTR}) { goto again; }
+      else { die "syswrite($tmp): $!" }
+   }
+   $tmp->close or die "close($tmp): $!";
+}
+
+if ($have_file_map) {
+   eval q{
+      sub _load_or_map_file { File::Map::map_file($_[0], $_[1], "<") }
+      1;
+   } or die "$@";
+} else {
+   *_load_or_map_file= *_load_file;
+}
 
 sub _linux_major_minor($dev) {
    use integer;
    ( (($dev >> 8) & 0xfff) | (($dev >> 31 >> 1) & 0xfffff000) ),
    ( ($dev & 0xff) | (($dev >> 12) & 0xffffff00) )
 }
-
-*_dev_major_minor= $have_unix_mknod? sub { Unix::Mknod::major($_[0]), Unix::Mknod::minor($_[0]) }
-   : *_linux_major_minor;
-
-sub _system_mknod($path, $mode, $dev) {
+sub _system_mknod($path, $mode, $major, $minor) {
    my @args= ("mknod", "-m", sprintf("0%o", $mode & 0xFFF),
-      $path, S_ISBLK($mode)? "b":"c", _dev_major_minor($dev));
+      $path, S_ISBLK($mode)? "b":"c", $major, $minor);
    system(@args) == 0
       or croak "mknod @args failed";
 }
 
-*_mknod_or_die= $have_unix_mknod? sub { Unix::Mknod::mknod(@_) or croak "mknod($_[0]): $!" }
-   : *_system_mknod;
+if ($have_unix_mknod) {
+   eval q{
+      sub _mknod_or_die { Unix::Mknod::mknod($_[0], $_[1], Unix::Mknod::makedev($_[2], $_[3])) or Carp::croak("mknod($_[0]): $!") }
+      sub _dev_major_minor { Unix::Mknod::major($_[0]), Unix::Mknod::minor($_[0]) }
+      1;
+   } or die "$@";
+} else {
+   *_mknod_or_die= *_system_mknod;
+   *_dev_major_minor= *_linux_major_minor;
+}
 
 sub _capture_cmd {
    require IPC::Open3;
