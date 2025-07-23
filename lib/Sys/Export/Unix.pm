@@ -558,6 +558,7 @@ sub add {
          %file= _attrs_from_array_notation(@$next);
       } else {
          $next =~ s,^/,,;
+         next unless length $next; # suppress exporting '/', if that happens for some reason
          $self->{_log_debug}->("Exporting $next")
             if $self->{_log_debug};
          @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$next)
