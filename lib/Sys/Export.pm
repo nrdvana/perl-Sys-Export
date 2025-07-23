@@ -136,7 +136,7 @@ sub import {
       if (ref $_[$i] eq 'HASH') {
          %ctor_opts= ( %ctor_opts, %{ splice(@_, $i--, 1) } );
       }
-      elsif ($_[$i] =~ /^-(type|src|dst|src_userdb|dst_userdb|rewrite_path|rewrite_user|rewrite_group)\z/) {
+      elsif ($_[$i] =~ /^-(type|src|dst|tmp|src_userdb|dst_userdb|rewrite_path|rewrite_user|rewrite_group)\z/) {
          $ctor_opts{$1}= (splice @_, $i--, 2)[1];
       }
    }
