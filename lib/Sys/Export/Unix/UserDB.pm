@@ -1,4 +1,5 @@
 package Sys::Export::Unix::UserDB;
+
 # ABSTRACT: Abstractions for Unix passwd/group/shadow files
 # VERSION
 
@@ -53,9 +54,7 @@ The goal of this object is to extract user/group information from one system ima
 into another, with proper conflict detection and UID/GID management.  It can also import users
 and groups from the host via C<getpwnam>/C<getgrnam>.
 
-=head1 CONSTRUCTOR
-
-=head2 new
+=constructor new
 
   $udb= Sys::Export::Unix::UserDB->new(%options);
 

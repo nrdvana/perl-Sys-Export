@@ -1,6 +1,6 @@
 package Sys::Export::Unix::WriteFS;
 
-# ABSTRACT: Export target that writes files to a directory in the host filesystem
+# ABSTRACT: An export target that writes files to a directory in the host filesystem
 # VERSION
 
 =head1 SYNOPSIS
@@ -15,6 +15,17 @@ exporter.
 
 =head1 DESCRIPTION
 
+This module simply writes all exported files to the host's filesystem.  This is more-or-less
+the default that people use when building system images, but the downside is that it reqrires
+the build script to be run as root.  You can avoid this by using L<Sys::Export::CPIO> as an
+export target, which is able to write directory entries directly to the cpio archive, skipping
+any local filesystem writes.
+
+Note that this module tracks device and inode in order to preserve hard-links, though only
+entries with C<nlink> greater than 1 are considered.  To generate a hard link, specify a
+distinct C<dev> and C<ino> combination (and nlink greater than 1) and then repeat those
+parameters later in order to link to the previous file.
+
 =constructor new
 
   Sys::Export::Unix::WriteFS->new(\%attributes); # hashref
@@ -27,7 +38,7 @@ Required attributes:
 =item dst
 
 The root of the exported system.  This directory must exist, and should be empty unless you
-specify 'on_conflict'.
+specify 'on_collision'.
 
 =back
 
@@ -60,7 +71,7 @@ written to it:
     # dst_abs is the absolute path about to be written
     # fileinfo is the hash of file attributes passed to ->add
     # _ will be set to an lstat of $dst_abs
-    return $action; # 'ignore' or 'overwrite' or 'croak_if_different'
+    return $action; # 'ignore' or 'overwrite' or 'ignore_if_same'
   }
 
 =back
