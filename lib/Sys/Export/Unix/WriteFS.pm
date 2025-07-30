@@ -84,16 +84,15 @@ use experimental qw( signatures );
 use Carp qw( croak carp );
 our @CARP_NOT= qw( Sys::Export::Unix );
 use Cwd qw( abs_path );
-use Fcntl qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK
-              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFMT );
-BEGIN { # Whiteout macros might not be defined
-   eval { Fcntl::S_IFWHT(); Fcntl->import(qw( S_ISWHT S_IFWHT )); 1 }
-   # default them to false, which code below handles at runtime
-   or eval 'sub S_ISWHT { 0 } sub S_IFWHT { 0 }';
+# Fcntl happily exports macros that don't exist, then fails at runtime.
+# Replace non-existent test macros with 'false', and nonexistent modes with 0.
+BEGIN {
+   eval "Fcntl::$_(0); 1;"? Fcntl->import($_) : eval "sub $_ { 0 }"
+      for qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
+              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT );
 }
 my sub isa_hash   :prototype($) { ref $_[0] eq 'HASH' }
 require Sys::Export::Unix;
-our $have_unix_mknod= eval { require Unix::Mknod; };
 
 sub new {
    my $class= shift;
@@ -208,7 +207,8 @@ sub add($self, $file) {
         : S_ISLNK($mode)? $self->_add_symlink($file)
         : (S_ISBLK($mode) || S_ISCHR($mode))? $self->_add_devnode($file)
         : S_ISFIFO($mode)? $self->_add_fifo($file)
-        : croak "Can't export ".(S_ISSOCK($mode)? 'sockets' : S_ISWHT($mode)? 'whiteout entries' : '(unknown)')
+        : S_ISSOCK($mode)? $self->_add_socket($file)
+        : croak "Can't export ".(S_ISWHT($mode)? 'whiteout entries' : '(unknown)')
             .': "'.($file->{src_path} // $file->{data_path} // $file->{name}).'"'
 }
 
@@ -292,8 +292,9 @@ sub _add_file($self, $file) {
             or croak "link($already, $dst): $!";
          return !!1;
       }
-      $self->_link_map->{"$file->{dev}:$file->{ino}"}= $dst;
    }
+   # Record all file inodes in case a delayed hardlink is created by the caller
+   $self->_link_map->{"$file->{dev}:$file->{ino}"}= $dst;
    # The caller may have created data_path within our ->tmp directory.
    # If not, first write the data into a temp file there.
    if (!defined $tmp || substr($tmp, 0, length $self->tmp) ne $self->tmp) {
@@ -348,6 +349,15 @@ sub _add_fifo($self, $file) {
    my $dst_abs= $self->dst_abs . $file->{name};
    POSIX::mkfifo($dst_abs, $file->{mode})
       or croak "mkfifo($dst_abs): $!";
+   $self->_apply_stat($dst_abs, $file);
+}
+
+# Bind a socket (thus creating it) in ->dst
+sub _add_socket($self, $file) {
+   require Socket;
+   my $dst_abs= $self->dst_abs . $file->{name};
+   socket(my $s, Socket::AF_UNIX(), Socket::SOCK_STREAM(), 0) or die "socket: $!";
+   bind($s, Socket::pack_sockaddr_un($dst_abs)) or die "Failed to bind socket at $dst_abs: $!";
    $self->_apply_stat($dst_abs, $file);
 }
 

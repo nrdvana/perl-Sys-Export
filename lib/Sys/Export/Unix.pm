@@ -110,8 +110,14 @@ use warnings;
 use experimental qw( signatures );
 use Carp qw( croak carp );
 use Cwd qw( abs_path );
-use Fcntl qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT 
-              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFMT );
+use Fcntl ();
+# Fcntl happily exports macros that don't exist, then fails at runtime.
+# Replace non-existent test macros with 'false', and nonexistent modes with 0.
+BEGIN {
+   eval "Fcntl::$_(0); 1;"? Fcntl->import($_) : eval "sub $_ { 0 }"
+      for qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
+              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT );
+}
 use Scalar::Util qw( blessed looks_like_number );
 use Sys::Export qw( :isa );
 use File::Temp ();
@@ -681,9 +687,10 @@ sub add {
       elsif (S_ISLNK($mode)) { $self->_export_symlink(\%file) }
       elsif (S_ISBLK($mode) || S_ISCHR($mode)) { $self->_export_devnode(\%file) }
       elsif (S_ISFIFO($mode)) { $self->_export_fifo(\%file) }
+      elsif (S_ISSOCK($mode)) { $self->_export_socket(\%file) }
+      elsif (S_ISWHT($mode)) { $self->_export_whiteout(\%file) }
       else {
-         croak "Can't export ".(S_ISSOCK($mode)? 'sockets' : S_ISWHT($mode)? 'whiteout entries' : '(unknown)')
-            .': "'.($file{src_path} // $file{data_path} // $file{name}).'"'
+         croak "Unhandled dir-ent type ".($mode & S_IFMT).' at "'.($file{src_path} // $file{data_path} // $file{name}).'"'
       }
    }
    $self;
@@ -1044,6 +1051,16 @@ sub _export_fifo($self, $file) {
    $self->_dst->add($file);
 }
 
+sub _export_socket($self, $file) {
+   $self->_log_action("SOK", "(socket)", $file->{name});
+   $self->_dst->add($file);
+}
+
+sub _export_whiteout($self, $file) {
+   $self->_log_action("WHT", "(whiteout)", $file->{name});
+   $self->_dst->add($file);
+}
+
 # _load_file(my $buffer, $filenme)
 sub _load_file {
    open my $fh, "<:raw", $_[1]
@@ -1088,8 +1105,16 @@ sub _system_mknod($path, $mode, $major, $minor) {
 
 if ($have_unix_mknod) {
    eval q{
-      sub _mknod_or_die { Unix::Mknod::mknod($_[0], $_[1], Unix::Mknod::makedev($_[2], $_[3])) or Carp::croak("mknod($_[0]): $!") }
-      sub _dev_major_minor { Unix::Mknod::major($_[0]), Unix::Mknod::minor($_[0]) }
+      sub _mknod_or_die($path, $mode, $major, $minor) {
+         Unix::Mknod::mknod($path, $mode, Unix::Mknod::makedev($major, $minor))
+            or Carp::croak("mknod($path): $!");
+         my @stat= stat $path
+            or Carp::croak("mknod($path) failed silently");
+         # Sometimes mknod just creates a normal file when user lacks permission for device nodes
+         ($stat[2] & Fcntl::S_IFMT()) == ($mode & Fcntl::S_IFMT()) or do { unlink $path; Carp::croak("mknod failed to create mode $mode at $path"); };
+         1;
+      }
+      sub _dev_major_minor($dev) { Unix::Mknod::major($dev), Unix::Mknod::minor($dev) }
       1;
    } or die "$@";
 } else {
@@ -1128,9 +1153,9 @@ sub _patchelf($self, $path, @args) {
 {  no strict 'refs';
    delete @{"Sys::Export::Unix::"}{qw(
       croak carp abs_path blessed looks_like_number
-      isa_export_dst isa_exporter isa_group isa_user isa_userdb
-      S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT 
-      S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFMT 
+      isa_export_dst isa_exporter isa_group isa_user isa_userdb S_IFMT
+      S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
+      S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT
    )};
 }
 
