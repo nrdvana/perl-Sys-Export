@@ -6,7 +6,7 @@ use experimental qw( signatures );
 use Sys::Export::Unix;
 use File::stat;
 use Socket;
-use Fcntl qw( S_IFDIR S_IFREG S_IFLNK S_IFCHR S_IFSOCK );
+use Fcntl qw( S_IFDIR S_IFREG S_IFLNK S_ISLNK S_IFCHR S_IFSOCK );
 use autodie;
 
 my $tmp= File::Temp->newdir;
@@ -83,7 +83,12 @@ subtest mode_checks => sub {
       if $^O eq 'MSWin32';
    for (@mode_check) {
       ok( my $stat= lstat($exporter->dst_abs . $_->[0]), "$_->[0] exists" );
-      is( $stat->mode, $_->[1], "$_->[0] mode" );
+      my $mode= $stat->mode;
+      # On FreeBSD, symlinks are affected by umask.  On Linux, they are always 0777.
+      # In both cases, the kernel ignores the permissions on the symlink itself,
+      # so quickest workaround is to just set them all.
+      $mode |= 0777 if S_ISLNK($mode);
+      is( $mode, $_->[1], "$_->[0] mode" );
    }
 };
 
