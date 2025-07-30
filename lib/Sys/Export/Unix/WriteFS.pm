@@ -87,7 +87,8 @@ use Cwd qw( abs_path );
 # Fcntl happily exports macros that don't exist, then fails at runtime.
 # Replace non-existent test macros with 'false', and nonexistent modes with 0.
 BEGIN {
-   eval "Fcntl::$_(0); 1;"? Fcntl->import($_) : eval "sub $_ { 0 }"
+   require Fcntl;
+   eval { Fcntl->can($_)->($_ =~ /_IS/? (0) : ()); 1 }? Fcntl->import($_) : eval "sub $_ { 0 }"
       for qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
               S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT );
 }

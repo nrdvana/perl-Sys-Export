@@ -110,11 +110,11 @@ use warnings;
 use experimental qw( signatures );
 use Carp qw( croak carp );
 use Cwd qw( abs_path );
-use Fcntl ();
 # Fcntl happily exports macros that don't exist, then fails at runtime.
 # Replace non-existent test macros with 'false', and nonexistent modes with 0.
 BEGIN {
-   eval "Fcntl::$_(0); 1;"? Fcntl->import($_) : eval "sub $_ { 0 }"
+   require Fcntl;
+   eval { Fcntl->can($_)->($_ =~ /_IS/? (0) : ()); 1 }? Fcntl->import($_) : eval "sub $_ { 0 }"
       for qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
               S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT );
 }
@@ -646,8 +646,10 @@ sub add {
       else {
          my $dst_parent= $file{name} =~ s,/?[^/]+$,,r;
          if (length $dst_parent && !exists $self->{dst_path_set}{$dst_parent}) {
+            $self->{_log_debug}->("  parent dir '$dst_parent' is not exported yet") if $self->{_log_debug};
             # if writing to a real dir, check whether it already exists by some other means
             if ($self->_dst->can('dst_abs') && -d $self->_dst->dst_abs . $dst_parent) {
+               $self->{_log_debug}->("  ".$self->_dst->dst_abs . "$dst_parent already exists in the filesystem") if $self->{_log_debug};
                # no need to do anything, but record that we have it
                $self->{dst_path_set}{$dst_parent}= undef;
             }
@@ -658,8 +660,9 @@ sub add {
                # If no rewrites, src_parent is the same as dst_parent
                if (!$self->_has_rewrites) {
                   $src_parent //= $dst_parent;
+                  $self->{_log_debug}->("  will export $src_parent first") if $self->{_log_debug};
                }
-               elsif (!defined $src_parent || $self->get_dst_for_src($src_parent) ne $dst_parent) {
+               elsif (!length $src_parent || $self->get_dst_for_src($src_parent) ne $dst_parent) {
                   # No src_path means we don't have an origin for this file, so no official
                   # origin for its parent directory, either.  But, maybe a directory of the
                   # same name exists in src_path.
@@ -670,8 +673,11 @@ sub add {
                      && S_ISDIR($dir{mode})
                   ) {
                      $src_parent= \%dir;
+                     $self->{_log_debug}->("  will export $dst_parent first, using permissions from $self->{src_abs}$dst_parent") if $self->{_log_debug};
+
                   } else {
                      $src_parent= { name => $dst_parent, mode => (S_IFDIR | 0755) };
+                     $self->{_log_debug}->("  will export $dst_parent first, using default 0755 permissions") if $self->{_log_debug};
                   }
                }
                unshift @$add, $src_parent, \%file;
