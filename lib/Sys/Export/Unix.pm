@@ -1103,7 +1103,7 @@ sub _linux_major_minor($dev) {
    ( ($dev & 0xff) | (($dev >> 12) & 0xffffff00) )
 }
 sub _system_mknod($path, $mode, $major, $minor) {
-   my @args= ("mknod", "-m", sprintf("0%o", $mode & 0xFFF),
+   my @args= ("mknod", ($^O eq 'linux'? ("-m", sprintf("0%o", $mode & 0xFFF)) : ()),
       $path, S_ISBLK($mode)? "b":"c", $major, $minor);
    system(@args) == 0
       or croak "mknod @args failed";
