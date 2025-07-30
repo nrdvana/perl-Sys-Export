@@ -374,8 +374,9 @@ subtest 'roundtrip load and save' => sub {
 
 subtest 'auto import from host' => sub {
    # presume every host has a 'root' user and group
+   # This always throws an exception on Win32 "The getpwman function is unimplemented"
    skip_all "This host doesn't have a root user?"
-      unless 0 == (getpwnam('root')//-1);
+      unless eval { 0 == (getpwnam('root')//-1) };
 
    my $db = Sys::Export::Unix::UserDB->new(auto_import => 1);
    is( $db->user('root'),

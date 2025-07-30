@@ -18,7 +18,8 @@ mkdir "$tmp/usr";
 mkdir "$tmp/usr/local";
 mkdir "$tmp/usr/local/bin";
 mkfile "$tmp/usr/local/bin/script", "#! /bin/sh\n", 0755;
-symlink "./script", "$tmp/usr/local/bin/script2";
+skip_all "symlinks not supported on this host"
+   unless eval { symlink "./script", "$tmp/usr/local/bin/script2" };
 
 my $exporter= Sys::Export::Unix->new(src => $tmp, dst => File::Temp->newdir);
 note "exporter src: '".$exporter->src."' dst: '".$exporter->dst."'";

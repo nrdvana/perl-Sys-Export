@@ -35,9 +35,6 @@ skip_all "Can't find qemu-system-x86_64"
 skip_all 'No docker access, or unable to fetch alpine image'
    unless system('docker','pull','alpine') == 0;
 
-warn "You can cache the Alpine package downloads by specifying DOCKER_TEST_IMAGE_NAME"
-   unless $ENV{DOCKER_TEST_IMAGE_NAME};
-
 # If the user provided a docker image name, we can cache things into the image.
 # Otherwise we need to pass all of that into the 'run' command and perform the
 # package installs as part of the entrypoint.
@@ -52,6 +49,7 @@ if ($ENV{DOCKER_TEST_IMAGE_NAME}) {
       or die "Can't build docker image $ENV{DOCKER_TEST_IMAGE_NAME}";
    @cmd= ( $ENV{DOCKER_TEST_IMAGE_NAME}, 'perl', "/opt/export/export.pl" );
 } else {
+   warn "You can cache the Alpine package downloads by specifying DOCKER_TEST_IMAGE_NAME";
    mkfile("$tmp/entrypoint.sh", <<~END, 0755);
       apk add perl patchelf
       perl /opt/export/export.pl
