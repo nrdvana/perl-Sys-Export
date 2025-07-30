@@ -28,8 +28,10 @@ my @mode_check= (
 
 subtest symlinks => sub {
    # Only test symlink creation on platforms that support it
-   skip_all "No symlink support on $^O"
-      unless eval { symlink "./datafile", "$tmp/usr/local/datafile2" or die };
+   unless (eval { symlink "./datafile", "$tmp/usr/local/datafile2" or die }) {
+      note "symlink check: ".($@//$!);
+      skip_all "No symlink support on $^O";
+   }
 
    push @mode_check, [ 'usr/local/datafile2', (S_IFLNK|0777) ];
    ok( $exporter->add('usr/local/datafile2'), 'add datafile2' );
@@ -43,8 +45,10 @@ if (!defined $exporter->dst_path_set->{"usr/local/datafile"}) {
 
 subtest hardlinks => sub {
    # Only test hardlink creation on platforms that support it
-   skip_all "No hardlink support on $^O"
-      unless eval { link "$tmp/usr/local/datafile", "$tmp/usr/local/hardlink" or die };
+   unless (eval { link "$tmp/usr/local/datafile", "$tmp/usr/local/hardlink" or die }) {
+      note "hardlink check: ".($@//$!);
+      skip_all "No hardlink support on $^O";
+   }
 
    push @mode_check, [ 'usr/local/hardlink', (S_IFREG|0644) ];
    ok( $exporter->add('/usr/local/hardlink'), 'link hardlink to datafile' );
@@ -55,8 +59,10 @@ subtest hardlinks => sub {
 
 subtest devnodes => sub {
    # Only test device node creation when running as root and on filesystems which permit them
-   skip_all "Can't create device nodes in current environment"
-      unless eval { Sys::Export::Unix::_mknod_or_die("$tmp/devnull", S_IFCHR|0777, 1, 3) };
+   unless (eval { Sys::Export::Unix::_mknod_or_die("$tmp/devnull", S_IFCHR|0777, 1, 3) }) {
+      note "mknod check: $@";
+      skip_all "Can't create device nodes in current environment";
+   }
 
    push @mode_check, [ 'devnull', (S_IFCHR|0777) ];
    ok( $exporter->add('devnull'), 'create char device devnull' );

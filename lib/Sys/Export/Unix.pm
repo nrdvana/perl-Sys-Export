@@ -1049,7 +1049,7 @@ sub _export_devnode($self, $file) {
       $file->{rdev_minor} //= $minor;
    }
    $self->_log_action(S_ISBLK($file->{mode})? 'BLK' : 'CHR', "$file->{rdev_major}:$file->{rdev_minor}", $file->{name});
-   $self->_dst->($file);
+   $self->_dst->add($file);
 }
 
 sub _export_fifo($self, $file) {
