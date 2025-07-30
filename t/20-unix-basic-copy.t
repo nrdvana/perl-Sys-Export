@@ -64,6 +64,7 @@ subtest devnodes => sub {
       skip_all "Can't create device nodes in current environment";
    }
 
+   chmod(0777, "$tmp/devnull") or die; # mknod is affected by umask
    push @mode_check, [ 'devnull', (S_IFCHR|0777) ];
    ok( $exporter->add('devnull'), 'create char device devnull' );
    my $dev_stat= stat($exporter->dst_abs . 'devnull');
