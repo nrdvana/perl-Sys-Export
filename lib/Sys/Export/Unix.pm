@@ -550,11 +550,16 @@ Returns C<$exporter> for chaining.
 
 sub add {
    my $self= shift;
-   my $add= ($self->{add} //= []);
+   # If called recursively, append to TODO list instead of immediately adding
+   if (ref $self->{add}) {
+      push @{ $self->{add} }, @_;
+      return $self;
+   }
+   my @add= @_;
+   local $self->{add}= \@add;
    my $dst_userdb;
-   push @$add, @_;
-   while (@$add) {
-      my $next= shift @$add;
+   while (@add) {
+      my $next= shift @add;
       my %file;
       if (ref $next eq 'HASH') {
          $self->{_log_debug}->("Exporting @{[ $next->{src_path}//'' ]} to $next->{name}")
@@ -583,7 +588,7 @@ sub add {
             my $target= readlink($self->{src_abs}.$next);
             my $full_target= $target =~ m,^/,? $target : $parent . $target;
             $self->{_log_debug}->("Symlink to '$target', queueing '$full_target'") if $self->{_log_debug};
-            unshift @$add, $full_target;
+            unshift @add, $full_target;
          } else {
             # Resolve symlinks within src/ to get the true identity of this file
             my $abs= $self->_src_abs_path($next);
@@ -680,7 +685,7 @@ sub add {
                      $self->{_log_debug}->("  will export $dst_parent first, using default 0755 permissions") if $self->{_log_debug};
                   }
                }
-               unshift @$add, $src_parent, \%file;
+               unshift @add, $src_parent, \%file;
                next;
             }
          }
@@ -891,13 +896,13 @@ sub _export_elf_file($self, $file, $notes) {
             my $lib= $self->_resolve_src_library($_, $elf->{rpath}) // carp("Can't find lib $_ needed for $file->{src_path}");
             push @libs, $lib if $lib;
          }
-         push @{$self->{add}}, @libs;
+         $self->add(@libs);
       }
       if (length $elf->{interpreter}) {
          $elf->{interpreter} =~ s,^/,,;
          $self->_elf_interpreters->{$elf->{interpreter}}= 1;
          $interpreter= $elf->{interpreter};
-         push @{$self->{add}}, $interpreter;
+         $self->add($interpreter);
       }
       $self->{_log_debug}->("  interpreter = ".($interpreter//'').", libs = @libs")
          if $self->{_log_debug};
@@ -939,7 +944,7 @@ sub _export_script_file($self, $file, $notes) {
    # Make sure the interpreter is added, and also rewrite its path
    my ($interp)= ($file->{data} =~ m,^#!\s*(/\S+),)
       or return;
-   push @{$self->{add}}, $interp;
+   $self->add($interp);
 
    if ($self->_has_rewrites && length $file->{src_path}) {
       # rewrite the interpreter, if needed
