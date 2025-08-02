@@ -84,15 +84,7 @@ use experimental qw( signatures );
 use Carp qw( croak carp );
 our @CARP_NOT= qw( Sys::Export::Unix );
 use Cwd qw( abs_path );
-# Fcntl happily exports macros that don't exist, then fails at runtime.
-# Replace non-existent test macros with 'false', and nonexistent modes with 0.
-BEGIN {
-   require Fcntl;
-   eval { Fcntl->can($_)->($_ =~ /_IS/? (0) : ()); 1 }? Fcntl->import($_) : eval "sub $_ { 0 }"
-      for qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
-              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT );
-}
-my sub isa_hash   :prototype($) { ref $_[0] eq 'HASH' }
+use Sys::Export qw( :stat_modes :stat_tests isa_hash );
 require Sys::Export::Unix;
 
 sub new {

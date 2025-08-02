@@ -9,13 +9,25 @@ use experimental qw( signatures );
 use Carp;
 use Scalar::Util qw( blessed looks_like_number );
 use Exporter ();
+BEGIN {
+   # Fcntl happily exports macros that don't exist, then fails at runtime.
+   # Replace non-existent test macros with 'false', and nonexistent modes with 0.
+   require Fcntl;
+   eval { Fcntl->can($_)->($_ =~ /_IS/? (0) : ()); 1 }? Fcntl->import($_) : eval "sub $_ { 0 }"
+      for qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
+              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT );
+}
 our @EXPORT_OK= qw(
-   isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter
-   add finish rewrite_path rewrite_user rewrite_group
+   isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
+   add finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
+   S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
+   S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
 );
 our %EXPORT_TAGS= (
    basic_methods => [qw( exporter add finish rewrite_path rewrite_user rewrite_group )],
-   isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group )],
+   isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_int )],
+   stat_modes => [qw( S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT )],
+   stat_tests => [qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT )],
 );
 my ($is_module_name, $require_module);
 
@@ -238,14 +250,109 @@ Is it an instance of C<Sys::Export::Unix::UserDB::User>?
 
 Is it an instance of C<Sys::Export::Unix::UserDB::Group>?
 
+=item isa_hash
+
+Is it a hashref?
+
+=item isa_array
+
+Is it an arrayref?
+
+=item isa_int
+
+Is it an integer?
+
 =back
 
 =cut
 
+sub isa_hash       :prototype($) { ref $_[0] eq 'HASH' }
+sub isa_array      :prototype($) { ref $_[0] eq 'ARRAY' }
+sub isa_int        :prototype($) { looks_like_number($_[0]) && int($_[0]) == $_[0] }
 sub isa_exporter   :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Exporter') }
 sub isa_export_dst :prototype($) { blessed($_[0]) && $_[0]->can('add') && $_[0]->can('finish') }
 sub isa_userdb     :prototype($) { blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
 sub isa_user       :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
 sub isa_group      :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
+
+=head2 C<:stat_modes> bundle
+
+  S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
+
+These are like the exports from L<Fcntl>, but return 0 if the macro is not defined on this platform.
+
+=head2 C<:stat_tests> bundle
+
+  S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
+
+These are like the exports from L<Fcntl>, but return false if the macro is not defined on this platform.
+
+=head2 expand_stat_shorthand
+
+  @kv_list= expand_stat_shorthand($arrayref);
+  @kv_list= expand_stat_shorthand($mode, $name);
+  @kv_list= expand_stat_shorthand($mode, $name, $mode_specific_data);
+  @kv_list= expand_stat_shorthand($mode, $name, \%other_attrs);
+  @kv_list= expand_stat_shorthand($mode, $name, $mode_specific_data, \%other_attrs);
+
+This is a utility function that takes a shorthand array notation for a directory entry, and
+expands it to the file attribute names as used in L<Sys::Export::Unix/add> or
+L<Sys::Export::CPIO/add>.
+
+The C<$mode> can either be a numeric Unix mode like C<< use Fcntl 'S_IFDIR'; (S_IFDIR|0755) >>
+or a name like C<'dir'> (with default permissions) or a name with a permission suffix like
+C<'dir755'>.
+
+For example:
+
+  [ file644 => "foo", $literal_data ],
+  [ file644 => "foo", { data_path => $filename } ],
+  [ dir700  => "root/.ssh" ],
+  [ dir1777 => "tmp" ],
+  [ sym     => "bar" => "foo" ],
+  [ chr777  => "dev/null" => [1,3] ],
+  [ blk660  => "dev/sda"  => [8,0], { group => "disk" } ],
+  [ fifo    => "run/queue" ],
+  [ sock    => "run/mysqld/mysql.sock", { user => "mysql", group => "mysql" } ],
+
+The default permissions are C<< 0777 & ~umask >> for a directory, C<0777> for symlinks, and
+C<< 0666 & ~umask >> for others.
+
+=cut
+
+our %_mode_alias= (
+   file => [ S_IFREG,  sub { 0666 & ~umask } ],
+   dir  => [ S_IFDIR,  sub { 0777 & ~umask } ],
+   sym  => [ S_IFLNK,  sub { 0777 } ],
+   blk  => [ S_IFBLK,  sub { 0666 & ~umask } ],
+   chr  => [ S_IFCHR,  sub { 0666 & ~umask } ],
+   fifo => [ S_IFIFO,  sub { 0666 & ~umask } ],
+   sock => [ S_IFSOCK, sub { 0666 & ~umask } ],
+);
+sub expand_stat_shorthand {
+   @_= @{$_[0]} if @_ == 1 && isa_array $_[0];
+   my %attrs= @_ > 2 && isa_hash $_[-1]? %{ pop @_ } : ();
+   my ($mode, $name, $data)= @_;
+   unless (isa_int $mode) {
+      $mode =~ /^([a-z]+)([0-7]+)?\z/
+         or croak "Invalid mode '$mode': expected number, or prefix file/dir/sym/blk/chr/fifo/sock followed by octal permissions";
+      $mode= $_mode_alias{$1}
+         or croak "Unknown mode alias '$1'";
+      $mode= $mode->[0] | (defined $2? oct($2) : $mode->[1]->());
+   }
+   $attrs{mode}= $mode;
+   length $name or croak "Name must be nonzero length";
+   $attrs{name}= $name;
+   if (defined $data) {
+      if (S_ISBLK($mode) || S_ISCHR($mode)) {
+         @attrs{'major','minor'}= isa_array $data? @$data : split(/[,:]/, $data);
+      }
+      elsif (S_ISREG($mode) || S_ISLNK($mode)) {
+         $attrs{data}= $data;
+      }
+   }
+   $attrs{nlink} //= 1;
+   return %attrs;
+}
 
 1;

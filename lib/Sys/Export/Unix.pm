@@ -110,25 +110,14 @@ use warnings;
 use experimental qw( signatures );
 use Carp qw( croak carp );
 use Cwd qw( abs_path );
-# Fcntl happily exports macros that don't exist, then fails at runtime.
-# Replace non-existent test macros with 'false', and nonexistent modes with 0.
-BEGIN {
-   require Fcntl;
-   eval { Fcntl->can($_)->($_ =~ /_IS/? (0) : ()); 1 }? Fcntl->import($_) : eval "sub $_ { 0 }"
-      for qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
-              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT );
-}
 use Scalar::Util qw( blessed looks_like_number );
-use Sys::Export qw( :isa );
+use Sys::Export qw( :isa :stat_modes :stat_tests );
 use File::Temp ();
 use POSIX ();
 require Sys::Export::Exporter;
 our @ISA= qw( Sys::Export::Exporter );
 our $have_file_map= eval { require File::Map; };
 our $have_unix_mknod= eval { require Unix::Mknod; };
-my sub isa_hash   :prototype($) { ref $_[0] eq 'HASH' }
-my sub isa_array  :prototype($) { ref $_[0] eq 'ARRAY' }
-my sub isa_int    :prototype($) { looks_like_number($_[0]) && int($_[0]) == $_[0] }
 
 sub new {
    my $class= shift;
@@ -516,6 +505,7 @@ sub _build_dst_userdb($self) {
 
   $exporter->add($src_path, ...);
   $exporter->add(\%file_attrs, ...);
+  $exporter->add([ $name, $mode, $mode_specific_data, \%other_attrs ]);
 
 Add a source path (logically absolute with respect to C</src>) to the export.  This immediately
 copies the file to the destination, possibly rewriting paths within it, and then triggering a
@@ -541,6 +531,8 @@ If specified directly, file attributes are:
   size            # size, in bytes.  Can be ommitted if 'data' is present
   mtime           # modification time, as per stat
 
+You can also use the array notation described in L<Sys::Export/expand_file_stat_array>.
+
 If you don't specify src_path, path rewrites will not be applied to the contents of the file or
 symlink (on the assumption that you used paths relative to the destination).
 
@@ -561,12 +553,12 @@ sub add {
    while (@add) {
       my $next= shift @add;
       my %file;
-      if (ref $next eq 'HASH') {
+      if (isa_hash $next) {
          $self->{_log_debug}->("Exporting @{[ $next->{src_path}//'' ]} to $next->{name}")
             if $self->{_log_debug};
          %file= %$next;
-      } elsif (ref $next eq 'ARRAY') {
-         %file= _attrs_from_array_notation(@$next);
+      } elsif (isa_array $next) {
+         %file= Sys::Export::expand_stat_shorthand(@$next);
       } else {
          $next =~ s,^/,,;
          next unless length $next; # suppress exporting '/', if that happens for some reason
@@ -705,37 +697,6 @@ sub add {
       }
    }
    $self;
-}
-
-our %_mode_alias= (
-   file => S_IFREG,
-   dir  => S_IFDIR,
-   sym  => S_IFLNK,
-   blk  => S_IFBLK,
-   chr  => S_IFCHR,
-   fifo => S_IFIFO,
-   sock => S_IFSOCK,
-);
-sub _attrs_from_array_notation {
-   my ($mode, $owner, $name)= (shift, shift, shift);
-   unless (isa_int $mode) {
-      $mode =~ /^(file|dir|sym|blk|chr|fifo|sock)(\d+)?\z/
-         or croak "Invalid mode '$mode': expected number, or prefix file/dir/sym/blk/chr/fifo/sock followed by octal permissions";
-      $mode= $_mode_alias{$1};
-      $mode |= oct($2 // ($mode == S_IFDIR? 0755 : 0644));
-   }
-   my %attrs= ( name => $name, mode => $mode );
-   my ($user,$group)= !defined $owner? (0,0) : split /:/, $owner;
-   $attrs{ isa_int($user)?  'uid' : 'user'  }= $user;
-   $attrs{ isa_int($group)? 'gid' : 'group' }= $group;
-   if (($mode & S_IFMT) == S_IFBLK || ($mode & S_IFMT) == S_IFCHR) {
-      @attrs{'major','minor'}= (shift, shift);
-   }
-   elsif (($mode & S_IFMT) == S_IFDIR) {
-      $attrs{data}= shift;
-   }
-   $attrs{nlink} //= 1;
-   return ( %attrs, @_ );
 }
 
 =method skip
