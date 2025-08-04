@@ -598,6 +598,7 @@ sub add {
          $file{name}= $self->get_dst_for_src($next);
          $self->{src_path_set}{$next}= $file{name};
       }
+      $file{nlink} //= 1;
 
       if (defined $file{user} && !defined $file{uid}) {
          $dst_userdb //= ($self->{dst_userdb} //= $self->_build_dst_userdb);

@@ -351,7 +351,6 @@ sub expand_stat_shorthand {
          $attrs{data}= $data;
       }
    }
-   $attrs{nlink} //= 1;
    return %attrs;
 }
 
