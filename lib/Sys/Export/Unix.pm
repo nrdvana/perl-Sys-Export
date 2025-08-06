@@ -554,47 +554,57 @@ sub add {
       my $next= shift @add;
       my %file;
       if (isa_hash $next) {
-         $self->{_log_debug}->("Exporting @{[ $next->{src_path}//'' ]} to $next->{name}")
-            if $self->{_log_debug};
          %file= %$next;
       } elsif (isa_array $next) {
          %file= Sys::Export::expand_stat_shorthand(@$next);
       } else {
          $next =~ s,^/,,;
          next unless length $next; # suppress exporting '/', if that happens for some reason
-         $self->{_log_debug}->("Exporting $next")
-            if $self->{_log_debug};
          @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$next)
             or croak "lstat '$self->{src_abs}$next': $!";
-         # Remap the UID/GID if that feature was requested
-         @file{'uid','gid'}= $self->get_dst_uid_gid(@file{'uid','gid'}, " in source filesystem at '$next'")
-            if $self->{_user_rewrite_map} || $self->{_group_rewrite_map};
-         # If $next is itself a symlink, we want to export this name, and also the thing
+         $file{src_path}= $next;
+      }
+      $self->{_log_debug}->("Exporting".(defined $file{src_path}? " $file{src_path}" : '').(defined $file{name}? " to $file{name}":''))
+         if $self->{_log_debug};
+      # Translate src to dst if user didn't supply a 'name'
+      if (!defined $file{name}) {
+         my $src_path= $file{src_path};
+         defined $src_path or croak "Require 'name' (or 'src_path' to derive name)";
+
+         if (defined $file{uid} && defined $file{gid}) {
+            # Remap the UID/GID if that feature was requested
+            @file{'uid','gid'}= $self->get_dst_uid_gid(@file{'uid','gid'}, " in source filesystem at '$src_path'")
+               if $self->{_user_rewrite_map} || $self->{_group_rewrite_map};
+         }
+         defined $file{mode}
+            or croak "'mode' is required";
+         # If $src_path is itself a symlink, we want to export this name, and also the thing
          # it references.
          if (S_ISLNK($file{mode})) {
             # resolve symlinks in the path leading up to this symlink
-            my $parent= $next =~ s,[^/]+$,,r;
-            $next= $self->_src_abs_path($parent) . ($next =~ m,(/[^/]+)$,)[0]
+            my $parent= $src_path =~ s,[^/]+$,,r;
+            $src_path= $self->_src_abs_path($parent) . ($src_path =~ m,(/[^/]+)$,)[0]
                if length $parent;
             # add this symlink target to the paths to be exported
-            my $target= readlink($self->{src_abs}.$next);
+            my $target= readlink($self->{src_abs}.$src_path);
+            $target =~ s,(?<=^|/)\./,,g; # path cleanup.  Leave .. but eliminate referenbces to . directory
             my $full_target= $target =~ m,^/,? $target : $parent . $target;
             $self->{_log_debug}->("Symlink to '$target', queueing '$full_target'") if $self->{_log_debug};
             unshift @add, $full_target;
          } else {
             # Resolve symlinks within src/ to get the true identity of this file
-            my $abs= $self->_src_abs_path($next);
-            defined $abs or croak "Can't resolve absolute path of '$next'";
-            $self->{_log_debug}->("Resolved to '$abs'") if $self->{_log_debug} && $abs ne $next;
-            $next= $abs;
+            my $abs= $self->_src_abs_path($src_path);
+            defined $abs or croak "Can't resolve absolute path of '$src_path'";
+            $self->{_log_debug}->("Resolved to '$abs'") if $self->{_log_debug} && $abs ne $src_path;
+            $src_path= $abs;
          }
          # ignore repeat requests
-         if (exists $self->{src_path_set}{$next}) {
-            $self->{_log_debug}->("  (already exported '$next')") if $self->{_log_debug};
+         if (exists $self->{src_path_set}{$src_path}) {
+            $self->{_log_debug}->("  (already exported '$src_path')") if $self->{_log_debug};
             next;
          }
-         $file{src_path}= $next;
-         $file{data_path}= $self->{src_abs} . $next;
+         $file{src_path}= $src_path;
+         $file{data_path}= $self->{src_abs} . $src_path;
          $file{name}= $self->get_dst_for_src($next);
          $self->{src_path_set}{$next}= $file{name};
       }
