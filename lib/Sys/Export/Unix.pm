@@ -115,6 +115,7 @@ use Sys::Export qw( :isa :stat_modes :stat_tests );
 use File::Temp ();
 use POSIX ();
 require Sys::Export::Exporter;
+our @CARP_NOT= qw( Sys::Export );
 our @ISA= qw( Sys::Export::Exporter );
 our $have_file_map= eval { require File::Map; };
 our $have_unix_mknod= eval { require Unix::Mknod; };

@@ -139,6 +139,7 @@ L</finish>.
 sub dst($self)          { $self->{dst} }
 sub dst_abs($self)      { $self->{dst_abs} }
 sub tmp($self)          { $self->{tmp} }
+sub on_collision($self) { $self->{on_collision} }
 
 # a hashref tracking files with link-count higher than 1, so that hardlinks can be preserved.
 # the keys are "$dev:$ino"
@@ -253,9 +254,9 @@ sub _croak_if_different($self, $file, $old) {
 
 # Compare file contents for equality
 sub _contents_same($file, $dst_abs) {
-   Sys::Export::Unix::_load_or_map_data($file->{data}, $file->{data_path})
+   Sys::Export::Unix::_load_or_map_file($file->{data}, $file->{data_path})
       unless defined $file->{data};
-   Sys::Export::Unix::_load_or_map_data(my $dst_data, $dst_abs);
+   Sys::Export::Unix::_load_or_map_file(my $dst_data, $dst_abs);
    return $file->{data} eq $dst_data;
 }
 
