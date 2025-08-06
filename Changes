@@ -1,5 +1,25 @@
-2025-07-22 - Version 0.001
+2025-07-30 - Version 0.002
+  - ::Unix::WriteFS can now create Socket directory entries
+  - New method 'src_find' is like File::Find specifically for iterating
+    files of the export source tree.
+  - New exported Sys::Export function 'find' calls 'exporter->src_find'
+  - Simplify exporter->add shorthand array notation
+    (e.g. ->add([ file => $name, $data ])
+    and move the implementation to Sys::Export as exportable function
+    'expand_stat_shorthand'
+  - You can pass a hashref to ->add containing 'src_path' and lacking
+    'name' as a way to ask for source-to-destination translation of the
+    path rather than using the attributes as-is.
+  - Detect failures in 'mknod' syscall
+  - Implemented ::Linux->add_localtime which was previously "..."
+  - Subclasses of the Unix exporter can call $self->add to queue files
+    to be added after the current one rather than messing with private
+    fields to accomplish that.
+  - Better support for running on non-Linux platforms, mostly in the tests
+  - Documentation improvements
+  - More tests
 
+2025-07-22 - Version 0.001
   - Initial version, with functioning t/81-qemu-initrd.t to prove that
     the basics work.  But, it's a bit light on testing considering the
     overall number of features and potential use cases.

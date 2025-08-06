@@ -711,6 +711,73 @@ sub add {
    $self;
 }
 
+=method src_find
+
+This is a helper function to build lists of source files.  It iterates the L</src> tree from
+a given subdirectory, passing each entry to a coderef filter.
+
+  $exporter->add($exporter->src_match('usr/src'));
+  $exporter->add($exporter->src_match('usr/src', sub { -f })); # only files
+
+The filter function runs in the following environment:
+
+=over
+
+=item C<$_>
+
+the absolute path of the source file
+
+=item C<_>
+
+the result of C<lstat> on the absolute path of the source file
+
+=item C<< $_[0] >>
+
+the hashref of stat attributes that will be returned by this function if the filter returns true
+
+=back
+
+The callback should return a boolean of whether to include the file in the result.  If it
+returns false for a directory, the directory will still be traversed.  If you want to prune a
+directory tree from being processed, set C<< $_[0]{prune} >> to a true value before returning.
+
+=cut
+
+sub src_find($self, $path, $filter= undef) {
+   my ($src_abs, @ret, @todo)= ( $self->src_abs );
+   $path //= '';
+   $path =~ s,^/,,; # remove leading slash
+   my $process= sub {
+      my %file= ( src_path => $path );
+      local $_= $src_abs . $_[0];
+      if (@file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat) {
+         my $is_dir= -d;
+         push @ret, \%file if length $path && (!defined $filter || $filter->(\%file));
+         if ($is_dir && !delete $file{prune}) {
+            if (opendir my $dh, $src_abs . $_[0]) {
+               push @todo, [ $_[0].'/', $dh ];
+            } else {
+               carp "Can't open $_: $!";
+            }
+         }
+      } else {
+         carp "Can't stat $_: $!";
+      }
+   };
+   $process->($path);
+   while (@todo) {
+      my $ent= readdir $todo[-1][1];
+      if (!defined $ent) {
+         closedir $todo[-1][1];
+         pop @todo;
+      }
+      elsif ($ent ne '.' && $ent ne '..') {
+         $process->($todo[-1][0] . $ent);
+      }
+   }
+   return @ret;
+}
+
 =method skip
 
   $exporter->skip($src_path);
