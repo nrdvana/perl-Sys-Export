@@ -717,10 +717,12 @@ sub add {
 This is a helper function to build lists of source files.  It iterates the L</src> tree from
 a given subdirectory, passing each entry to a coderef filter.
 
-  $exporter->add($exporter->src_match('usr/src'));
-  $exporter->add($exporter->src_match('usr/src', sub { -f })); # only files
+  @hashrefs= $exporter->src_find(@paths);
+  @hashrefs= $exporter->src_find($filter, @paths);
+  @hashrefs= $exporter->src_find(@paths, $filter);
 
-The filter function runs in the following environment:
+The filter can be a coderef or Regexp-ref.  Any other type is considered a path.  The filter
+function runs in the following environment:
 
 =over
 
@@ -743,20 +745,32 @@ The callback should return a boolean of whether to include the file in the resul
 returns false for a directory, the directory will still be traversed.  If you want to prune a
 directory tree from being processed, set C<< $_[0]{prune} >> to a true value before returning.
 
+For a Regexp-ref, you are matching against the full absolute path within L</src>.
+If you want a regex to only apply to the relative path of a file, just write it as a sub like
+
+  sub { $_[0]{src_path} =~ /pattern/ }
+
 =cut
 
-sub src_find($self, $path, $filter= undef) {
-   my ($src_abs, @ret, @todo)= ( $self->src_abs );
+my sub isa_filter { ref $_[0] eq 'Regexp' || ref $_[0] eq 'CODE' }
+sub src_find($self, @paths) {
+   my $filter;
+   # The filter must be either the first or last argument
+   if (isa_filter $paths[0]) {
+      $filter= shift @paths;
+   } elsif (isa_filter $paths[-1]) {
+      $filter= pop @paths;
+   }
+   my ($src_abs, @ret, @todo, %seen)= ( $self->src_abs );
    # If filter is a regexp-ref, upgrade it to a sub
    if (ref $filter eq 'Regexp') {
       my $qr= $filter;
       $filter= sub { $_ =~ $qr };
    }
-   $path //= '';
-   $path =~ s,^/,,; # remove leading slash
    my $process= sub {
       my %file= ( src_path => $_[0] );
       local $_= $src_abs . $_[0];
+      return if $seen{$_}++; # within this call to src_find, don't return duplicates
       if (@file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat) {
          my $is_dir= -d;
          push @ret, \%file if length $_[0] && (!defined $filter || $filter->(\%file));
@@ -771,15 +785,20 @@ sub src_find($self, $path, $filter= undef) {
          carp "Can't stat $_: $!";
       }
    };
-   $process->($path);
-   while (@todo) {
-      my $ent= readdir $todo[-1][1];
-      if (!defined $ent) {
-         closedir $todo[-1][1];
-         pop @todo;
-      }
-      elsif ($ent ne '.' && $ent ne '..') {
-         $process->($todo[-1][0] . $ent);
+   push @paths, '' unless @paths;
+   for my $path (@paths) {
+      $path //= '';
+      $path =~ s,^/,,; # remove leading slash
+      $process->($path);
+      while (@todo) {
+         my $ent= readdir $todo[-1][1];
+         if (!defined $ent) {
+            closedir $todo[-1][1];
+            pop @todo;
+         }
+         elsif ($ent ne '.' && $ent ne '..') {
+            $process->($todo[-1][0] . $ent);
+         }
       }
    }
    return @ret;
