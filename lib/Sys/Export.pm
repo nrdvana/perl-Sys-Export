@@ -214,21 +214,26 @@ the global exporter object get exported as functions:
 
 =over
 
-=item add
+=item L<add|Sys::Export::Unix/add>
 
-=item finish
+=item L<skip|Sys::Export::Unix/skip>
 
-=item rewrite_path
+=item L<find|Sys::Export::Unix/src_find>
 
-=item rewrite_user
+=item L<finish|Sys::Export::Unix/finish>
 
-=item rewrite_group
+=item L<rewrite_path|Sys::Export::Unix/rewrite_path>
+
+=item L<rewrite_user|Sys::Export::Unix/rewrite_user>
+
+=item L<rewrite_group|Sys::Export::Unix/rewrite_group>
 
 =back
 
 =cut
 
 sub add           { $exporter->add(@_) }
+sub skip          { $exporter->skip(@_) }
 sub find          { $exporter->src_find(@_) }
 sub finish        { $exporter->finish(@_) }
 sub rewrite_path  { $exporter->rewrite_path(@_) }

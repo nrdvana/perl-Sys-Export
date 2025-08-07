@@ -836,6 +836,7 @@ to directories since writing the contents of the directory would have changed th
 sub finish($self) {
    $self->_dst->finish;
    undef $self->{tmp}; # allow File::Temp to free tmp dir
+   $self;
 }
 
 =method get_dst_for_src
