@@ -333,34 +333,45 @@ C<< 0666 & ~umask >> for others.
 
 =cut
 
+sub _parse_major_minor_data($attrs, $data) {
+   @{$attrs}{'major','minor'}= isa_array $data? @$data : split(/[,:]/, $data);
+}
 our %_mode_alias= (
    file => [ S_IFREG,  sub { 0666 & ~umask } ],
    dir  => [ S_IFDIR,  sub { 0777 & ~umask } ],
    sym  => [ S_IFLNK,  sub { 0777 } ],
-   blk  => [ S_IFBLK,  sub { 0666 & ~umask } ],
-   chr  => [ S_IFCHR,  sub { 0666 & ~umask } ],
+   blk  => [ S_IFBLK,  sub { 0666 & ~umask }, \&_parse_major_minor_data, ],
+   chr  => [ S_IFCHR,  sub { 0666 & ~umask }, \&_parse_major_minor_data, ],
    fifo => [ S_IFIFO,  sub { 0666 & ~umask } ],
    sock => [ S_IFSOCK, sub { 0666 & ~umask } ],
 );
+our @_mode_by_int;
+$_mode_by_int[$_->[0]]= $_ for values %_mode_alias;
+$_mode_by_int[0]= undef; # don't map 0 to any mode
+
 sub expand_stat_shorthand {
    @_= @{$_[0]} if @_ == 1 && isa_array $_[0];
    my %attrs= @_ > 2 && isa_hash $_[-1]? %{ pop @_ } : ();
    my ($mode, $name, $data)= @_;
-   unless (isa_int $mode) {
+   my $mode_desc;
+   if (isa_int $mode) {
+      $mode_desc= $_mode_by_int[$mode & S_IFMT]
+         or carp sprintf("Numeric mode %x doesn't match any known node types", $mode);
+   }
+   else {
       $mode =~ /^([a-z]+)([0-7]+)?\z/
          or croak "Invalid mode '$mode': expected number, or prefix file/dir/sym/blk/chr/fifo/sock followed by octal permissions";
-      $mode= $_mode_alias{$1}
+      $mode_desc= $_mode_alias{$1}
          or croak "Unknown mode alias '$1'";
-      $mode= $mode->[0] | (defined $2? oct($2) : $mode->[1]->());
+      $mode= $mode_desc->[0] | (defined $2? oct($2) : $mode_desc->[1]->());
    }
    $attrs{mode}= $mode;
    length $name or croak "Name must be nonzero length";
    $attrs{name}= $name;
    if (defined $data) {
-      if (S_ISBLK($mode) || S_ISCHR($mode)) {
-         @attrs{'major','minor'}= isa_array $data? @$data : split(/[,:]/, $data);
-      }
-      elsif (S_ISREG($mode) || S_ISLNK($mode)) {
+      if ($mode_desc && $mode_desc->[2]) {
+         $mode_desc->[2]->(\%attrs, $data);
+      } else {
          $attrs{data}= $data;
       }
    }
