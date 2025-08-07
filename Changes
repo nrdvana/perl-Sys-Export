@@ -1,3 +1,7 @@
+  - API Changes:
+    - Sys::Export -dst parameter may now be an arrayref [CPIO => $filename]
+      for easy access to specify cpio output.
+
 2025-08-07 - Version 0.002
   - API Changes:
     - New Sys::Export::Unix->src_find is like File::Find specifically for

@@ -134,6 +134,15 @@ sub new {
    defined $attrs{dst} or croak "Require 'dst' attribute";
    if (isa_export_dst $attrs{dst}) {
       $attrs{_dst}= $attrs{dst};
+   } elsif (isa_array $attrs{dst}) {
+      my @spec= @{$attrs{dst}};
+      my $type= shift @spec;
+      if (uc $type eq 'CPIO') {
+         require Sys::Export::CPIO;
+         $attrs{_dst}= Sys::Export::CPIO->new(@spec);
+      } else {
+         croak "Unknown -dst type '$type'";
+      }
    } else {
       my $dst_abs= abs_path($attrs{dst} =~ s,(?<=[^/])$,/,r)
          or croak "dst directory '$attrs{dst}' does not exist";

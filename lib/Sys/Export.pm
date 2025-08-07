@@ -43,8 +43,7 @@ if (eval { require Module::Runtime; }) {
 
 =head1 SYNOPSIS
 
-  use Sys::Export::CPIO;
-  use Sys::Export -src => '/', -dst => Sys::Export::CPIO->new("initrd.cpio");
+  use Sys::Export -src => '/', -dst => [ CPIO => "initrd.cpio" ];
   
   rewrite_path '/sbin'     => '/bin';
   rewrite_path '/usr/sbin' => '/bin';
