@@ -9,7 +9,7 @@ use experimental qw( signatures );
 use Fcntl qw( S_IFDIR S_IFMT );
 use Scalar::Util 'blessed';
 use Carp;
-our @CARP_NOT= qw( Sys::Export::Unix );
+our @CARP_NOT= qw( Sys::Export Sys::Export::Unix );
 require Sys::Export::Unix; # for _dev_major_minor 
 
 =head1 SYNOPSIS
@@ -19,7 +19,9 @@ require Sys::Export::Unix; # for _dev_major_minor
   $cpio->add(\%stat_name_and_data);
   $cpio->add(\%stat_name_and_data);
   ...
-  # close the file yourself
+  $cpio->finish;  # write trailer entry and flush/close file.
+                  # file is *not* closed automatically if you passed
+                  # an open handle to the constructor.
 
 =head1 DESCRIPTION
 
@@ -64,15 +66,36 @@ The rest of the arguments can be used to initialize attributes.
 =cut
 
 sub new($class, $f, @attrs) {
+   croak "Expected even-length key/value list after filename" if @attrs & 1;
+   my $filename;
    my $fh= blessed $f && $f->can('print')? $f
-      : do { open my $x, '>:raw', $f or die "open($f): $!"; $x };
-   my $self= bless { fh => $fh, seen_inode => {}, ino => 0, virtual_inodes => 1 }, $class;
+      : do { $filename= $f; open my $x, '>:raw', $f or die "open($f): $!"; $x };
+   my $self= bless {
+      fh => $fh,
+      seen_inode => {},
+      ino => 0,
+      virtual_inodes => 1,
+      filename => $filename,
+      autoclose => defined $filename,
+   }, $class;
+
    while (@attrs) {
       my ($attr, $val)= splice(@attrs, 0, 2);
       $self->$attr($val);
    }
+
    $self;
 }
+
+=attribute autoclose
+
+If true, calling L</finish> will close the file handle.  This is enabled by default if you
+passed a filename to the constructor.
+
+=attribute filename
+
+Just informational for debugging.  Will be undef if you passed a file handle rather than a file
+name to the constructor.
 
 =attribute virtual_inodes
 
@@ -80,6 +103,16 @@ This is enabled by default, and rewrites the device_major/device_minor with zero
 a linear sequence for a virtual inode on each file.
 
 =cut
+
+sub autoclose {
+   $_[0]{autoclose}= !!$_[1] if @_ > 1; # cast to boolean
+   $_[0]{autoclose}
+}
+
+sub filename {
+   $_[0]{filename}= $_[1] if @_ > 1;
+   $_[0]{filename}
+}
 
 sub virtual_inodes {
    $_[0]{virtual_inodes}= !!$_[1] if @_ > 1; # cast to boolean
@@ -153,15 +186,20 @@ sub add($self, $fileinfo) {
       if $size;
    $self->{fh}->print("\0"x(4-($size & 3))) || die "write: $!"
       if $size & 3; # pad to multiple of 4
+   $self;
 }
 
 =method finish
 
-No-op.  Provided to fufill the interface for an exporter destination.
+Writes end-of-file signature, and closes the handle if L</autoclose> is true.
 
 =cut
 
-sub finish {
+sub finish($self) {
+   $self->add({ mode => 0, ino => 0, name => 'TRAILER!!!' });
+   $self->{fh}->flush;
+   $self->{fh}->close if $self->autoclose;
+   $self;
 }
 
 # Avoiding dependency on namespace::clean
