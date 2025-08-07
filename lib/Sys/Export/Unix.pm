@@ -588,7 +588,8 @@ sub add {
                if length $parent;
             # add this symlink target to the paths to be exported
             my $target= readlink($self->{src_abs}.$src_path);
-            $target =~ s,(?<=^|/)\./,,g; # path cleanup.  Leave .. but eliminate referenbces to . directory
+            $target =~ s,/\./,/,g; # path cleanup.  Leave .. but eliminate referenbces to . directory
+            $target =~ s,^\./,,;
             my $full_target= $target =~ m,^/,? $target : $parent . $target;
             $self->{_log_debug}->("Symlink to '$target', queueing '$full_target'") if $self->{_log_debug};
             unshift @add, $full_target;
