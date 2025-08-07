@@ -50,8 +50,20 @@ if (eval { require Module::Runtime; }) {
   rewrite_path '/usr/sbin' => '/bin';
   rewrite_path '/usr/bin'  => '/bin';
   
+  # Add files and their dependencies
   add '/bin/busybox';
-  add ...;
+  add qw( bin/sh bin/date bin/cat bin/mount );
+  
+  # tell 'add' to ignore specific files
+  skip 'usr/share/zoneinfo/tzdata.zi';
+  
+  # recurse and filter directories with 'find'
+  add find 'usr/share/zoneinfo', sub { ! /(leapseconds|\.tab|\.list)$/ };
+  
+  # For Linux, generate minimal /etc/passwd /etc/group /etc/shadow according
+  # to UID/GID which were exported so far.
+  exporter->add_passwd;
+  
   finish;
 
 =head1 DESCRIPTION

@@ -25,6 +25,7 @@ use v5.26;
 use warnings;
 use experimental qw( signatures );
 use parent 'Sys::Export::Unix';
+use Carp;
 
 =method add_passwd
 
@@ -102,6 +103,13 @@ sub add_localtime($self, $tz_name) {
    else {
       croak "Can't find 'usr/share/zoneinfo/$tz_name' in destination, source, or host filesystem";
    }
+}
+
+# Avoiding dependency on namespace::clean
+{  no strict 'refs';
+   delete @{"Sys::Export::Linux::"}{qw(
+      croak carp
+   )};
 }
 
 1;
