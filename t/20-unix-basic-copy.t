@@ -11,7 +11,7 @@ use autodie;
 
 my $tmp= File::Temp->newdir;
 
-my $exporter= Sys::Export::Unix->new(src => $tmp, dst => File::Temp->newdir);
+my $exporter= Sys::Export::Unix->new(src => $tmp, dst => File::Temp->newdir, log => 'trace');
 note "exporter src: '".$exporter->src."' dst: '".$exporter->dst."'";
 
 umask 022;
@@ -32,10 +32,14 @@ subtest symlinks => sub {
       note "symlink check: ".($@//$!);
       skip_all "No symlink support on $^O";
    }
+   symlink "/nonexistent", "$tmp/usr/link-to-nonexistent" or die;
 
    push @mode_check, [ 'usr/local/datafile2', (S_IFLNK|0777) ];
    ok( $exporter->add('usr/local/datafile2'), 'add datafile2' );
    ok( defined $exporter->dst_path_set->{"usr/local/datafile"}, 'symlink target also exported' );
+
+   push @mode_check, [ 'usr/link-to-nonexistent', (S_IFLNK|0777) ];
+   ok( $exporter->add('usr/link-to-nonexistent'), 'add dangling symlink' );
 };
 
 # If the symlink target wasn't exported above, export it now

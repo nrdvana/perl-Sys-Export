@@ -559,6 +559,13 @@ sub add {
    }
    my @add= @_;
    local $self->{add}= \@add;
+   my sub cleanup_src_path {
+      # Remove leading '/', which is implied
+      s,^/,,;
+      # Remove occurrences of self-directory '.'
+      s,/\.(/|\z),/,g;
+      s,^\.(/|\z),,;
+   }
    my $dst_userdb;
    while (@add) {
       my $next= shift @add;
@@ -568,7 +575,7 @@ sub add {
       } elsif (isa_array $next) {
          %file= Sys::Export::expand_stat_shorthand(@$next);
       } else {
-         $next =~ s,^/,,;
+         &cleanup_src_path for $next;
          next unless length $next; # suppress exporting '/', if that happens for some reason
          @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$next)
             or croak "lstat '$self->{src_abs}$next': $!";
@@ -578,8 +585,14 @@ sub add {
          if $self->{_log_debug};
       # Translate src to dst if user didn't supply a 'name'
       if (!defined $file{name}) {
+         defined $file{src_path} or croak "Require 'name' (or 'src_path' to derive name)";
+         &cleanup_src_path for $file{src_path};
          my $src_path= $file{src_path};
-         defined $src_path or croak "Require 'name' (or 'src_path' to derive name)";
+         # ignore repeat requests
+         if (exists $self->{src_path_set}{$src_path}) {
+            $self->{_log_debug}->("  (already exported '$src_path')") if $self->{_log_debug};
+            next;
+         }
 
          if (defined $file{uid} && defined $file{gid}) {
             # Remap the UID/GID if that feature was requested
@@ -588,36 +601,47 @@ sub add {
          }
          defined $file{mode}
             or croak "'mode' is required";
-         # If $src_path is itself a symlink, we want to export this name, and also the thing
-         # it references.
+         # Resolve symlinks in src_path, but if $src_path is a symlink itself, perform abs_path
+         # on only the parent path
+         my $real_src_path;
          if (S_ISLNK($file{mode})) {
-            # resolve symlinks in the path leading up to this symlink
-            my $parent= $src_path =~ s,[^/]+$,,r;
-            $src_path= $self->_src_abs_path($parent) . ($src_path =~ m,(/[^/]+)$,)[0]
-               if length $parent;
-            # add this symlink target to the paths to be exported
-            my $target= readlink($self->{src_abs}.$src_path);
-            $target =~ s,/\./,/,g; # path cleanup.  Leave .. but eliminate referenbces to . directory
-            $target =~ s,^\./,,;
-            my $full_target= $target =~ m,^/,? $target : $parent . $target;
-            $self->{_log_debug}->("Symlink to '$target', queueing '$full_target'") if $self->{_log_debug};
-            unshift @add, $full_target;
+            # resolve symlinks in the path leading up to this symlink, unless parent is empty
+            if (length (my $parent= ($src_path =~ s,[^/]+$,,r))) {
+               $real_src_path= $self->_src_abs_path($parent) // croak "Can't resolve absolute path of '$parent'";
+               $real_src_path .= substr($src_path, length($parent) - 1);
+            } else {
+               $real_src_path= $src_path;
+            }
          } else {
-            # Resolve symlinks within src/ to get the true identity of this file
-            my $abs= $self->_src_abs_path($src_path);
-            defined $abs or croak "Can't resolve absolute path of '$src_path'";
-            $self->{_log_debug}->("Resolved to '$abs'") if $self->{_log_debug} && $abs ne $src_path;
-            $src_path= $abs;
+            $real_src_path= $self->_src_abs_path($src_path) // croak "Can't resolve absolute path of '$src_path'";
          }
-         # ignore repeat requests
-         if (exists $self->{src_path_set}{$src_path}) {
-            $self->{_log_debug}->("  (already exported '$src_path')") if $self->{_log_debug};
-            next;
+         # If the path is no longer the same, check for duplicates again
+         if ($real_src_path ne $src_path) {
+            $self->{_log_debug}->("Resolved to '$real_src_path'") if $self->{_log_debug};
+            # ignore repeat requests
+            if (exists $self->{src_path_set}{$real_src_path}) {
+               $self->{src_path_set}{$src_path}= $self->{src_path_set}{$real_src_path};
+               $self->{_log_debug}->("  (already exported '$real_src_path')") if $self->{_log_debug};
+               next;
+            }
          }
-         $file{src_path}= $src_path;
-         $file{data_path}= $self->{src_abs} . $src_path;
-         $file{name}= $self->get_dst_for_src($next);
-         $self->{src_path_set}{$next}= $file{name};
+         $file{src_path}= $real_src_path;
+         $file{data_path}= $self->{src_abs} . $real_src_path;
+         $file{name}= $self->get_dst_for_src($real_src_path);
+         $self->{src_path_set}{$real_src_path}= $file{name};
+         # If it was a symlink, also export the symlink target
+         if (S_ISLNK($file{mode})) {
+            # add this symlink target to the paths to be exported
+            my $target= readlink($self->{src_abs}.$real_src_path) // croak "readlink($self->{src_abs}.$real_src_path): $!";
+            my $abs_target= $target =~ m,^/,? substr($target,1) : ($real_src_path =~ s,[^/]+$,,r) . $target;
+            &cleanup_src_path for $abs_target;
+            if (-e $self->{src_abs} . $abs_target) {
+               $self->{_log_debug}->("Symlink to '$target', queueing '$abs_target'") if $self->{_log_debug};
+               unshift @add, $abs_target;
+            } else {
+               $self->{_log_info}->("Exporting dangling symlink '$real_src_path' which points to missing '$abs_target'");
+            }
+         }
       }
       $file{nlink} //= 1;
 
