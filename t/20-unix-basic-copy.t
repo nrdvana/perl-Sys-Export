@@ -33,6 +33,7 @@ subtest symlinks => sub {
       skip_all "No symlink support on $^O";
    }
    symlink "/nonexistent", "$tmp/usr/link-to-nonexistent" or die;
+   symlink "/usr", "$tmp/usr/up-abs" or die;
 
    push @mode_check, [ 'usr/local/datafile2', (S_IFLNK|0777) ];
    ok( $exporter->add('usr/local/datafile2'), 'add datafile2' );
@@ -40,6 +41,9 @@ subtest symlinks => sub {
 
    push @mode_check, [ 'usr/link-to-nonexistent', (S_IFLNK|0777) ];
    ok( $exporter->add('usr/link-to-nonexistent'), 'add dangling symlink' );
+
+   push @mode_check, [ 'usr/up-abs', (S_IFLNK|0777) ];
+   ok( $exporter->add('usr/up-abs/up-abs/up-abs'), 'add self-following symlink to /usr' );
 };
 
 # If the symlink target wasn't exported above, export it now

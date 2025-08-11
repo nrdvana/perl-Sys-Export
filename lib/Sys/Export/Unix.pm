@@ -393,6 +393,13 @@ sub _chroot_abs_path($self, $root, $path) {
 sub _src_abs_path($self, $path) {
    $self->_chroot_abs_path($self->{src_abs}, $path);
 }
+sub _src_parent_abs_path($self, $path) {
+   # Determine the final path component, ignoring '.'
+   my @path= grep length && $_ ne '.', split '/', $path;
+   return $path[0] // '' unless @path > 1;
+   my $parent= $self->_src_abs_path(join '/', @path[0 .. $#path - 1]);
+   return defined $parent? "$parent/$path[-1]" : undef;
+}
 
 =head1 USER REMAPPING
 
@@ -559,13 +566,6 @@ sub add {
    }
    my @add= @_;
    local $self->{add}= \@add;
-   my sub cleanup_src_path {
-      # Remove leading '/', which is implied
-      s,^/,,;
-      # Remove occurrences of self-directory '.'
-      s,/\.(/|\z),/,g;
-      s,^\.(/|\z),,;
-   }
    my $dst_userdb;
    while (@add) {
       my $next= shift @add;
@@ -575,48 +575,26 @@ sub add {
       } elsif (isa_array $next) {
          %file= Sys::Export::expand_stat_shorthand(@$next);
       } else {
-         &cleanup_src_path for $next;
-         next unless length $next; # suppress exporting '/', if that happens for some reason
-         @file{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$next)
-            or croak "lstat '$self->{src_abs}$next': $!";
-         $file{src_path}= $next;
+         %file= ( src_path => $next );
       }
       $self->{_log_debug}->("Exporting".(defined $file{src_path}? " $file{src_path}" : '').(defined $file{name}? " to $file{name}":''))
          if $self->{_log_debug};
       # Translate src to dst if user didn't supply a 'name'
       if (!defined $file{name}) {
-         defined $file{src_path} or croak "Require 'name' (or 'src_path' to derive name)";
-         &cleanup_src_path for $file{src_path};
          my $src_path= $file{src_path};
+         defined $src_path or croak "Require 'name' (or 'src_path' to derive name)";
          # ignore repeat requests
          if (exists $self->{src_path_set}{$src_path}) {
             $self->{_log_debug}->("  (already exported '$src_path')") if $self->{_log_debug};
             next;
          }
-
-         if (defined $file{uid} && defined $file{gid}) {
-            # Remap the UID/GID if that feature was requested
-            @file{'uid','gid'}= $self->get_dst_uid_gid(@file{'uid','gid'}, " in source filesystem at '$src_path'")
-               if $self->{_user_rewrite_map} || $self->{_group_rewrite_map};
-         }
-         defined $file{mode}
-            or croak "'mode' is required";
-         # Resolve symlinks in src_path, but if $src_path is a symlink itself, perform abs_path
-         # on only the parent path
-         my $real_src_path;
-         if (S_ISLNK($file{mode})) {
-            # resolve symlinks in the path leading up to this symlink, unless parent is empty
-            if (length (my $parent= ($src_path =~ s,[^/]+$,,r))) {
-               $real_src_path= $self->_src_abs_path($parent) // croak "Can't resolve absolute path of '$parent'";
-               $real_src_path .= substr($src_path, length($parent) - 1);
-            } else {
-               $real_src_path= $src_path;
-            }
-         } else {
-            $real_src_path= $self->_src_abs_path($src_path) // croak "Can't resolve absolute path of '$src_path'";
-         }
-         # If the path is no longer the same, check for duplicates again
-         if ($real_src_path ne $src_path) {
+         # Need to immediately abs-path the parent dir of this path in case src_path follows
+         # symlinks through absolute paths, e.g. "/usr/bin/mount", if /usr/bin is a symlink to
+         # "/bin" rather than "../bin" it will fail whenever ->src is not pointed to '/'.
+         my $real_src_path= $file{real_src_path} // $self->_src_parent_abs_path($src_path);
+         if (!defined $real_src_path) {
+            $self->{_log_debug}->("Couldn't resolve real path for '$src_path'") if $self->{_log_debug};
+         } elsif ($real_src_path ne $src_path) {
             $self->{_log_debug}->("Resolved to '$real_src_path'") if $self->{_log_debug};
             # ignore repeat requests
             if (exists $self->{src_path_set}{$real_src_path}) {
@@ -625,23 +603,24 @@ sub add {
                next;
             }
          }
+         # If mode wasn't supplied, get it from src filesystem
+         if (!defined $file{mode}) {
+            my %stat;
+            @stat{qw( dev ino mode nlink uid gid rdev size atime mtime ctime )}= lstat($self->{src_abs}.$real_src_path)
+               or croak "lstat '$self->{src_abs}$real_src_path': $!";
+            %file= ( %stat, %file );
+         }
+
+         if (defined $file{uid} || defined $file{gid}) {
+            # Remap the UID/GID if that feature was requested
+            @file{'uid','gid'}= $self->get_dst_uid_gid($file{uid}//0, $file{gid}//0, " in source filesystem at '$src_path'")
+               if $self->{_user_rewrite_map} || $self->{_group_rewrite_map};
+         }
          $file{src_path}= $real_src_path;
-         $file{data_path}= $self->{src_abs} . $real_src_path;
+         $file{data_path} //= $self->{src_abs} . $real_src_path;
          $file{name}= $self->get_dst_for_src($real_src_path);
          $self->{src_path_set}{$real_src_path}= $file{name};
-         # If it was a symlink, also export the symlink target
-         if (S_ISLNK($file{mode})) {
-            # add this symlink target to the paths to be exported
-            my $target= readlink($self->{src_abs}.$real_src_path) // croak "readlink($self->{src_abs}.$real_src_path): $!";
-            my $abs_target= $target =~ m,^/,? substr($target,1) : ($real_src_path =~ s,[^/]+$,,r) . $target;
-            &cleanup_src_path for $abs_target;
-            if (-e $self->{src_abs} . $abs_target) {
-               $self->{_log_debug}->("Symlink to '$target', queueing '$abs_target'") if $self->{_log_debug};
-               unshift @add, $abs_target;
-            } else {
-               $self->{_log_info}->("Exporting dangling symlink '$real_src_path' which points to missing '$abs_target'");
-            }
-         }
+         $self->{src_path_set}{$src_path}= $file{name} if $real_src_path ne $src_path;
       }
       $file{nlink} //= 1;
 
@@ -1095,6 +1074,26 @@ sub _export_symlink($self, $file) {
          or croak "Symlink must contain 'data' or 'data_path'";
       defined( $file->{data}= readlink($file->{data_path}) )
          or croak "readlink($file->{data_path}): $!";
+      # Symlink referenced a source file, so also export the symlink target
+      # If target is relative and the data_path wasn't inside the src_abs tree, then not
+      # sensible to export it.
+      if ($file->{data} !~ m,^/, and substr($file->{data_path}, 0, length $self->{src_abs}) ne $self->{src_abs}) {
+         $self->{_log_debug}->("Symlink $file->{name} read from $file->{data_path} which is outside $self->{src_abs}; not adding symlink target $file->{data}")
+            if $self->{_log_debug};
+      }
+      else {
+         # make relative path absolute
+         my $target= $file->{data} =~ m,^/,? $file->{data}
+                   : (substr($file->{data_path}, length $self->{src_abs}) =~ s,[^/]*\z,,r) . $file->{data};
+         my $abs_target= $self->_src_parent_abs_path($target);
+         # Only queue it if it exists.  Exporting dangling symlinks is not an error
+         if (defined $abs_target && lstat $self->{src_abs} . $abs_target) {
+            $self->{_log_debug}->("Queueing target '$target' of symlink '$file->{name}'") if $self->{_log_debug};
+            $self->add($target);
+         } else {
+            $self->{_log_debug}->("Symlink '$file->{name}' target '$target' doesn't exist") if $self->{_log_debug};
+         }
+      }
    }
 
    if ($self->_has_rewrites && length $file->{src_path}) {
