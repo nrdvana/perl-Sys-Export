@@ -361,7 +361,7 @@ sub _has_rewrites($self) {
 #   * readlink fails
 # Un-intuitively, this returns a string without a leading '/' because that's what I need below.
 sub _chroot_abs_path($self, $root, $path) {
-   my @base= split '/', $root;
+   my @base= $root eq '/'? ('') : split '/', $root;
    my @abs= @base;
    my @parts= grep length && $_ ne '.', split '/', $path;
    my $lim= 256;

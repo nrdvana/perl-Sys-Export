@@ -32,11 +32,16 @@ subtest symlinks => sub {
       note "symlink check: ".($@//$!);
       skip_all "No symlink support on $^O";
    }
+   symlink "/usr/local/datafile", "$tmp/usr/local/datafile-abs" or die;
    symlink "/nonexistent", "$tmp/usr/link-to-nonexistent" or die;
    symlink "/usr", "$tmp/usr/up-abs" or die;
 
    push @mode_check, [ 'usr/local/datafile2', (S_IFLNK|0777) ];
    ok( $exporter->add('usr/local/datafile2'), 'add datafile2' );
+   ok( defined $exporter->dst_path_set->{"usr/local/datafile"}, 'symlink target also exported' );
+
+   push @mode_check, [ 'usr/local/datafile-abs', (S_IFLNK|0777) ];
+   ok( $exporter->add('usr/local/datafile-abs'), 'add datafile-abs' );
    ok( defined $exporter->dst_path_set->{"usr/local/datafile"}, 'symlink target also exported' );
 
    push @mode_check, [ 'usr/link-to-nonexistent', (S_IFLNK|0777) ];
