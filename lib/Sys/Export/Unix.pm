@@ -318,7 +318,9 @@ sub _build_log_fn($self, $dest) {
 
 sub _log_action($self, $verb, $src, $dst, @notes) {
    if ($self->{_log_info}) {
-      $self->{_log_info}->(sprintf "%3s %-20s -> %s", $verb, $src, $dst);
+      my $width= int((length($src) + 11) / 12) * 12;
+      $width= 24 if $width < 24;
+      $self->{_log_info}->(sprintf "%3s %-*s -> %s", $verb, $width, $src, $dst);
       $self->{_log_info}->(sprintf "     %s", $_) for @notes;
    }
 }
@@ -1149,7 +1151,7 @@ sub _export_symlink($self, $file) {
       }
    }
 
-   $self->_log_action('SYM', $file->{data}, $file->{name});
+   $self->_log_action('SYM', '"'.$file->{data}.'"', $file->{name});
    $self->_dst->add($file);
 }
 
