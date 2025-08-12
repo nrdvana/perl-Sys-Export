@@ -338,7 +338,7 @@ C<< 0666 & ~umask >> for others.
 =cut
 
 sub _parse_major_minor_data($attrs, $data) {
-   @{$attrs}{'major','minor'}= isa_array $data? @$data : split(/[,:]/, $data);
+   @{$attrs}{'rdev_major','rdev_minor'}= isa_array $data? @$data : split(/[,:]/, $data);
 }
 our %_mode_alias= (
    file => [ S_IFREG,  sub { 0666 & ~umask } ],
