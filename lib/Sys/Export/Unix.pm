@@ -961,7 +961,7 @@ sub _export_file($self, $file) {
          _load_or_map_file($file->{data}, $file->{data_path});
       }
       my @notes;
-      # Check for ELF signature
+      # Check for ELF signature or script-interpreter
       if (substr($file->{data}, 0, 4) eq "\x7fELF") {
          $self->_export_elf_file($file, \@notes);
       } elsif ($file->{data} =~ m,^#!\s*/,) {
@@ -1043,25 +1043,27 @@ sub _export_elf_file($self, $file, $notes) {
 
 sub _export_script_file($self, $file, $notes) {
    # Make sure the interpreter is added, and also rewrite its path
-   my ($interp)= ($file->{data} =~ m,^#!\s*(/\S+),)
+   my ($interp)= ($file->{data} =~ m,^#!\s*/(\S+),)
       or return;
    $self->add($interp);
 
    if ($self->_has_rewrites && length $file->{src_path}) {
       # rewrite the interpreter, if needed
       my $rre= $self->path_rewrite_regex;
-      if ($interp =~ s/^$rre/$self->{path_rewrite_map}{$1}/e) {
+      if ($interp =~ s,^$rre,$self->{path_rewrite_map}{$1},e) {
          # note file->{data} could be a read-only memory map
-         my $data= delete($file->{data}) =~ s/^(#!\s*)(\S+)/$1$interp/r;
+         my $data= delete($file->{data}) =~ s,^(#!\s*)(\S+),$1/$interp,r;
          $file->{data}= $data;
+         push @$notes, '+rewrite interpreter';
       }
       # Scan the source for paths that need rewritten
       if ($file->{data} =~ $rre) {
          # Rewrite paths in shell scripts, but only warn about others.
          # Rewriting perl scripts would basically require a perl parser...
          if ($interp =~ m,/(bash|ash|dash|sh)$,) {
-            my $rewritten= $self->_rewrite_shell(delete $file->{data});
-            $file->{data}= $rewritten;
+            my ($interp_line, $body)= split "\n", $file->{data}, 2;
+            $body= $self->_rewrite_shell($body, $interp_line);
+            $file->{data}= "$interp_line\n$body";
             push @$notes, '+rewrite paths';
          } else {
             warn "$file->{src_path} is a script referencing a rewritten path, but don't know how to process it\n";
@@ -1071,7 +1073,7 @@ sub _export_script_file($self, $file, $notes) {
    }
 }
 
-sub _rewrite_shell($self, $contents) {
+sub _rewrite_shell($self, $contents, $interpreter) {
    my $rre= $self->path_rewrite_regex;
    # only replace path matches when following certain characters which
    # indicate the start of a path.
