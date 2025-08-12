@@ -292,7 +292,8 @@ sub _add_file($self, $file) {
       }
    }
    # Record all file inodes in case a delayed hardlink is created by the caller
-   $self->_link_map->{"$file->{dev}:$file->{ino}"}= $dst;
+   $self->_link_map->{"$file->{dev}:$file->{ino}"}= $dst
+      if defined $file->{dev} && defined $file->{ino};
    # The caller may have created data_path within our ->tmp directory.
    # If not, first write the data into a temp file there.
    if (!defined $tmp || substr($tmp, 0, length $self->tmp) ne $self->tmp) {
