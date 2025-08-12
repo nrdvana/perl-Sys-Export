@@ -139,7 +139,11 @@ L</finish>.
 sub dst($self)          { $self->{dst} }
 sub dst_abs($self)      { $self->{dst_abs} }
 sub tmp($self)          { $self->{tmp} }
-sub on_collision($self) { $self->{on_collision} }
+
+sub on_collision($self, @value) {
+   $self->{on_collision}= $value[0] if @value;
+   $self->{on_collision}
+}
 
 # a hashref tracking files with link-count higher than 1, so that hardlinks can be preserved.
 # the keys are "$dev:$ino"

@@ -82,18 +82,8 @@ themselves up.
 
 =item on_collision
 
-Specifies what to do if there is a name collision in the destination.  The default (undef)
-causes an exception unless the existing file is identical to the one that would be written.
-
-Setting this to 'overwrite' will unconditionally replace files as it runs.  Setting it to
-'ignore' will silently ignore collisions and leave the existing file in place.
-Setting it to a coderef will provide you with the path and content thata was about to be
-written to it:
-
-  on_collision => sub ($exporter, $fileinfo, $prev_src_path) {
-    # src_path is relative to $exporter->src
-    # dst_path is relative to $exporter->dst
-    # content_ref is a scalar ref with the new contents of the file, possibly rewritten
+Specifies what to do if there is a name collision in the destination.  See attribute
+L</on_collision>.
 
 =item log
 
@@ -271,6 +261,29 @@ sub _elf_interpreters($self) { $self->{elf_interpreters} //= {} }
 
 sub DESTROY($self, @) {
    $self->finish if $self->{_delayed_apply_stat};
+}
+
+=attribute on_collision
+
+Specifies what to do if there is a name collision in the destination.  The default (undef)
+causes an exception unless the existing file is identical to the one that would be written.
+
+Setting this to 'overwrite' will unconditionally replace files as it runs.  Setting it to
+'ignore' will silently ignore collisions and leave the existing file in place.
+Setting it to a coderef will provide you with the path and content that was about to be
+written to it:
+
+  $exporter->on_collision(sub ($dst_path, $fileinfo) {
+    # dst_path is the relative-to-dst-root path about to be written
+    # fileinfo is the hash of file attributes passed to ->add
+    return $action; # 'ignore' or 'overwrite' or 'ignore_if_same'
+  }
+
+=cut
+
+sub on_collision($self, @value) {
+   $self->{on_collision}= $value[0] if @value;
+   $self->{on_collision}
 }
 
 =attribute log
