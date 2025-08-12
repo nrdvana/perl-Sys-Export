@@ -29,7 +29,7 @@ use Carp;
 
 =method add_passwd
 
-  $exporter->add_passwd; # no options yet
+  $exporter->add_passwd(%options)
 
 This method writes the Linux password files ( C<< /etc/passwd >>, C<< /etc/group >>,
 C<< /etc/shadow >> ) either according to the contents of L<Sys::Export::Unix/dst_userdb>
@@ -49,6 +49,16 @@ If you actually just want to copy the entire source user database files, you cou
 
 so that pattern doesn't need a special helper method.
 
+Options:
+
+=over
+
+=item etc_path
+
+Specify an alternative directory to '/etc' to write the files
+
+=back
+
 =cut
 
 sub add_passwd($self, %options) {
@@ -62,7 +72,11 @@ sub add_passwd($self, %options) {
       $db->group($_) for keys $self->dst_gid_used->%*;
       $db->user($_) for keys $self->dst_uid_used->%*;
    };
-   $db->save($self);
+   $db->save(\my %contents);
+   my $etc_path= $options{etc_path} // 'etc';
+   $self->add([ file644 => "$etc_path/passwd", $contents{passwd} ]);
+   $self->add([ file600 => "$etc_path/shadow", $contents{shadow} ]);
+   $self->add([ file644 => "$etc_path/group",  $contents{group} ]);
    $self;
 }
 
