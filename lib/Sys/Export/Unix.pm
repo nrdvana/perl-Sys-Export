@@ -595,11 +595,11 @@ sub add {
       $self->{_log_debug}->("Exporting".(defined $file{src_path}? " $file{src_path}" : '').(defined $file{name}? " to $file{name}":''))
          if $self->{_log_debug};
       # Translate src to dst if user didn't supply a 'name'
-      if (!defined $file{name}) {
+      if (!defined $file{name} || !defined $file{mode}) {
          my $src_path= $file{src_path};
          defined $src_path or croak "Require 'name' (or 'src_path' to derive name)";
          # ignore repeat requests
-         if (exists $self->{src_path_set}{$src_path}) {
+         if (exists $self->{src_path_set}{$src_path} && !defined $file{name}) {
             $self->{_log_debug}->("  (already exported '$src_path')") if $self->{_log_debug};
             next;
          }
@@ -633,7 +633,7 @@ sub add {
          }
          $file{src_path}= $real_src_path;
          $file{data_path} //= $self->{src_abs} . $real_src_path;
-         $file{name}= $self->get_dst_for_src($real_src_path);
+         $file{name} //= $self->get_dst_for_src($real_src_path);
          $self->{src_path_set}{$real_src_path}= $file{name};
          $self->{src_path_set}{$src_path}= $file{name} if $real_src_path ne $src_path;
       }
@@ -955,7 +955,7 @@ sub _export_file($self, $file) {
    }
    if (!defined $prev) {
       # Load the data, unless already provided
-      unless (exists $file->{data}) {
+      unless (defined $file->{data}) {
          defined $file->{data_path}
             or croak "For regular files, must specify ->{data} or ->{data_path}";
          _load_or_map_file($file->{data}, $file->{data_path});
