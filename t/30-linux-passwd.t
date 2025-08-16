@@ -13,6 +13,9 @@ package Sys::Export::MockDst {
    sub finish($self)      {}
 }
 
+# my $pass_hash= crypt("test", q{$6$12345678$});   breaks on Win32, so just hard-code it
+my $pass_hash= '$6$12345678$8Vkis/4wY9G5zD48pxdrbx3GyPCSsno5BigQ5pCfBXdoDBRxHNrLoKOWo9uI8DJ6i7vliOboPQaqxwn3knEOh.';
+
 my $tmp= File::Temp->newdir;
 my $dst= Sys::Export::MockDst->new();
 my $exporter= Sys::Export::Linux->new(
@@ -21,7 +24,7 @@ my $exporter= Sys::Export::Linux->new(
    src_userdb => {
       auto_import => 0,
       users => {
-         u1 => { uid => 1001, groups => ['users'], passwd => crypt("test", q{$6$12345678$}) },
+         u1 => { uid => 1001, groups => ['users'], passwd => $pass_hash },
          u2 => { uid => 1002, groups => ['users','g3'] },
          u3 => { uid => 1003, groups => ['g2','g3'] },
          u4 => { uid => 1004, groups => ['g2'] },
@@ -70,8 +73,8 @@ is( \%passwd,
          field uid => 0;
          field gid => 0;
          field mode => (S_IFREG | 0600);
-         field data => <<~'END';
-         u1:$6$12345678$8Vkis/4wY9G5zD48pxdrbx3GyPCSsno5BigQ5pCfBXdoDBRxHNrLoKOWo9uI8DJ6i7vliOboPQaqxwn3knEOh.:::::::
+         field data => <<~END;
+         u1:${pass_hash}:::::::
          END
          etc;
       },
