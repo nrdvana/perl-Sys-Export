@@ -86,7 +86,8 @@ of Group objects.
 
 =cut
 
-sub new($class, %args) {
+sub new($class, @args) {
+   my %args= @args == 1 && isa_hash($args[0])? $args[0]->%* : @args;
    my $self = bless {
       users  => {},
       uids   => {},
@@ -124,7 +125,7 @@ sub new($class, %args) {
          croak "Option 'users' must be arrayref or hashref of user objects";
       }
    }
-   return bless $self, $class;
+   return $self;
 }
 
 =attribute users
@@ -420,7 +421,8 @@ Returns the newly created user object, or dies.
 =cut
 
 sub import_user($self, $name_or_obj, %attrs) {
-   if (ref($name_or_obj) && ref($name_or_obj)->isa('Sys::Export::Unix::UserDB::User')) {
+   ref $name_or_obj or length $name_or_obj or croak "Attempt to import empty username";
+   if (isa_hash($name_or_obj) || isa_user($name_or_obj)) {
       %attrs= ( %$name_or_obj, %attrs );
    } elsif (keys %attrs) {
       $attrs{name}= "$name_or_obj";
@@ -512,7 +514,8 @@ Returns the newly created group object, or dies.
 =cut
 
 sub import_group($self, $name_or_obj, %attrs) {
-   if (isa_hash($name_or_obj) || isa_user($name_or_obj)) {
+   ref $name_or_obj or length $name_or_obj or croak "Attempt to import empty username";
+   if (isa_hash($name_or_obj) || isa_group($name_or_obj)) {
       %attrs= ( %$name_or_obj, %attrs );
    } elsif (keys %attrs) {
       $attrs{name}= "$name_or_obj";
@@ -623,14 +626,15 @@ Like L</group> but returns a boolean and doesn't attempt to C<auto_import>.
 =cut
 
 sub user($self, $spec) {
+   length $spec or return undef;
    my $u= isa_int $spec? $self->{uids}{$spec} : $self->{users}{$spec};
    if (!$u && $self->auto_import) {
       if (isa_userdb $self->auto_import) {
-         $u= $self->auto_import->user($spec);
-         $u= eval { $self->import_user($u) } if $u;
+         my $peer_u= $self->auto_import->user($spec) // return undef;
+         $u= eval { $self->import_user($peer_u) } or warn $@;
       } else {
-         my $name= isa_int $spec? getpwuid($spec) : $spec;
-         $u= eval { $self->import_user($name) } || warn $@ if length $name;
+         my $name= isa_int $spec? (getpwuid($spec) // return undef) : $spec;
+         $u= eval { $self->import_user($name) } or warn $@;
       }
    }
    $u;
@@ -641,14 +645,15 @@ sub has_user($self, $spec) {
 }
 
 sub group($self, $spec) {
+   length $spec or return undef;
    my $g= isa_int $spec? $self->{gids}{$spec} : $self->{groups}{$spec};
    if (!$g && $self->auto_import) {
       if (isa_userdb $self->auto_import) {
-         $g= $self->auto_import->group($spec);
-         $g= eval { $self->import_group($g) } if $g;
+         my $peer_g= $self->auto_import->group($spec) // return undef;
+         $g= eval { $self->import_group($peer_g) } or warn $@;
       } else {
-         my $name= isa_int $spec? getgrgid($spec) : $spec;
-         $g= eval { $self->import_group($name) } || warn $@ if length $name;
+         my $name= isa_int $spec? (getgrgid($spec) // return undef) : $spec;
+         $g= eval { $self->import_group($name) } or warn $@;
       }
    }
    $g;
@@ -839,8 +844,8 @@ package Sys::Export::Unix::UserDB::User {
       croak "User 'uid' is required" unless defined $self->{uid};
       unless (defined $self->{group}) {
          # pull primary group from first element of list if not provided
-         if (isa_array $self->{groups}) {
-            $self->{group}= $self->{groups}[0];
+         if (isa_array $attrs{groups}) {
+            $self->{group}= $attrs{groups}[0];
          }
          croak "User primary 'group' is required" unless length $self->{group};
       }

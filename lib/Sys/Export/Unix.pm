@@ -151,6 +151,14 @@ sub new {
    # otherwise use system tmp dir
    $attrs{tmp} //= File::Temp->newdir;
 
+   # Upgrade src_userdb and dst_userdb if provided as hashrefs
+   for (qw( src_userdb dst_userdb )) {
+      if (defined $attrs{$_} && !isa_userdb($attrs{$_})) {
+         require Sys::Export::Unix::UserDB;
+         $attrs{$_}= Sys::Export::Unix::UserDB->new($attrs{$_});
+      }
+   }
+
    my $self= bless \%attrs, $class;
 
    $self->_build_log_fn($self->{log} //= 'info');
@@ -236,6 +244,8 @@ sub src_path_set($self) { $self->{src_path_set} //= {} }
 sub dst_path_set($self) { $self->{dst_path_set} //= {} }
 sub dst_uid_used($self) { $self->{dst_uid_used} //= {} }
 sub dst_gid_used($self) { $self->{dst_gid_used} //= {} }
+sub src_userdb($self)   { $self->{src_userdb} }
+sub dst_userdb($self)   { $self->{dst_userdb} }
 
 =attribute path_rewrite_regex
 
@@ -514,6 +524,7 @@ sub rewrite_group($self, $src, $dst) {
 
 sub _build_src_userdb($self) {
    # The default source UserDB pulls from src/etc/passwd and auto_imports users from the host
+   require Sys::Export::Unix::UserDB;
    my $udb= Sys::Export::Unix::UserDB->new(auto_import => 1);
    $udb->load($self->src_abs . 'etc')
       if -f $self->src_abs . 'etc/passwd';
@@ -522,6 +533,7 @@ sub _build_src_userdb($self) {
 
 sub _build_dst_userdb($self) {
    # The default dest UserDB uses any dst/etc/passwd and auto_imports users from src_userdb
+   require Sys::Export::Unix::UserDB;
    my $udb= Sys::Export::Unix::UserDB->new(
       auto_import => ($self->{src_userdb} //= $self->_build_src_userdb)
    );

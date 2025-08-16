@@ -64,19 +64,17 @@ Specify an alternative directory to '/etc' to write the files
 sub add_passwd($self, %options) {
    # If the dst_userdb hasn't been created, create it by filtering the src_userdb by which
    # group and user ids have been seen during the export.
-   my $db= $self->dst_userdb;
-   unless ($db) {
-      $db= Sys::Export::Unix::UserDB->new(
-         auto_import => ($self->{src_userdb} //= $self->_build_src_userdb),
-      );
-      $db->group($_) for keys $self->dst_gid_used->%*;
-      $db->user($_) for keys $self->dst_uid_used->%*;
-   };
+   my $db= $self->dst_userdb // Sys::Export::Unix::UserDB->new(
+      auto_import => ($self->{src_userdb} //= $self->_build_src_userdb),
+   );
+   $db->group($_) for keys $self->dst_gid_used->%*;
+   $db->user($_) for keys $self->dst_uid_used->%*;
    $db->save(\my %contents);
    my $etc_path= $options{etc_path} // 'etc';
-   $self->add([ file644 => "$etc_path/passwd", $contents{passwd} ]);
-   $self->add([ file600 => "$etc_path/shadow", $contents{shadow} ]);
-   $self->add([ file644 => "$etc_path/group",  $contents{group} ]);
+   $self->add([ dir755  => "$etc_path", { uid => 0, gid => 0 }]);
+   $self->add([ file644 => "$etc_path/passwd", $contents{passwd}, { uid => 0, gid => 0 }]);
+   $self->add([ file600 => "$etc_path/shadow", $contents{shadow}, { uid => 0, gid => 0 }]);
+   $self->add([ file644 => "$etc_path/group",  $contents{group},  { uid => 0, gid => 0 }]);
    $self;
 }
 
