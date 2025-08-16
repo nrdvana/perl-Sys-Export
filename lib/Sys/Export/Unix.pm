@@ -557,20 +557,28 @@ sub _build_dst_userdb($self) {
   $exporter->add(\%file_attrs, ...);
   $exporter->add([ $name, $mode, $mode_specific_data, \%other_attrs ]);
 
-Add a source path (logically absolute with respect to C</src>) to the export.  This immediately
-copies the file to the destination, possibly rewriting paths within it, and then triggering a
-copy of any libraries or interpreters it depends on.
+Add one or more source paths (relative to C</src>) or full file specifications to the export.
+This immediately copies the file to the destination, also triggering a copy of any interpreters
+or libraries it depends on which weren't already added.
 
-If specified directly, file attributes are:
+Any item with a C<src_path> attribute will be translated according to L</rewrite_path>,
+L</rewrite_user>, and L</rewrite_group>.  This includes generating the 'name' attribute and also
+rewriting the contents of files and symlinks.
+If it is missing attributes, they will be filled-in with a call to C<lstat>.
+
+Any item without a C<src_path> is assumed to be already rewritten by the user, and must specify
+at least attributes C<name> and C<mode>.
+
+The file attributes are:
 
   name            # destination path relative to destination root
   src_path        # source path relative to source root, no leading '/'
   data            # literal data content of file (must be bytes, not unicode)
-  data_path       # absolute path of file to load 'data' from
-  dev             # device, from stat
+  data_path       # absolute path of file to load 'data' from, not limited to src dir
+  dev             # device of origin, as per lstat
   dev_major       # major(dev), if you know it and don't know 'dev'
   dev_minor       # minor(dev), if you know it and don't know 'dev'
-  ino             # inode, from stat
+  ino             # inode, from stat.  used with 'dev' for hardlink tracking
   mode            # permissions and type, as per stat
   nlink           # number of hard links
   uid             # user id
@@ -582,9 +590,8 @@ If specified directly, file attributes are:
   mtime           # modification time, as per stat
 
 You can also use the array notation described in L<Sys::Export/expand_file_stat_array>.
-
-If you don't specify src_path, path rewrites will not be applied to the contents of the file or
-symlink (on the assumption that you used paths relative to the destination).
+Array-notation provides a C<name> attribute rather than a C<src_path>, so those do no get
+rewritten.
 
 Returns C<$exporter> for chaining.
 
