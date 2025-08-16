@@ -101,6 +101,7 @@ use experimental qw( signatures );
 use Carp qw( croak carp );
 use Cwd qw( abs_path );
 use Scalar::Util qw( blessed looks_like_number );
+use List::Util qw( max );
 use Sys::Export qw( :isa :stat_modes :stat_tests );
 use File::Temp ();
 use POSIX ();
@@ -341,8 +342,13 @@ sub _build_log_fn($self, $dest) {
 
 sub _log_action($self, $verb, $src, $dst, @notes) {
    if ($self->{_log_info}) {
-      my $width= int((length($src) + 11) / 12) * 12;
-      $width= 24 if $width < 24;
+      # Track the width of the previous 10 filenames to provide easy-to-read consistent indenting
+      my $widths= ($self->{_log_name_widths} //= []);
+      unshift @$widths, length($src);
+      pop @$widths if @$widths > 10;
+      my $width= max(24, @$widths);
+      # Then round width to a multiple of 8
+      $width= ($width + 7) & ~7;
       $self->{_log_info}->(sprintf "%3s %-*s -> %s", $verb, $width, $src, $dst);
       $self->{_log_info}->(sprintf "     %s", $_) for @notes;
    }
@@ -609,7 +615,7 @@ sub add {
       # Translate src to dst if user didn't supply a 'name'
       if (!defined $file{name} || !defined $file{mode}) {
          my $src_path= $file{src_path};
-         defined $src_path or croak "Require 'name' (or 'src_path' to derive name)";
+         defined $src_path or croak(defined $file{mode}? "Require src_path to determine 'mode'" : "Require 'name' (or 'src_path' to derive name)");
          # ignore repeat requests
          if (exists $self->{src_path_set}{$src_path} && !defined $file{name}) {
             $self->{_log_debug}->("  (already exported '$src_path')") if $self->{_log_debug};
