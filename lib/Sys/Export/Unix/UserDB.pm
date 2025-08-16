@@ -315,8 +315,8 @@ sub _slurp($name) {
 our @_linux_shadow_fields= qw( passwd pw_change_time pw_min_days pw_max_days pw_warn_days pw_inactive_days expire_time );
 
 # Unix time ignores leap seconds, so the conversion from seconds to days is simple division
-sub _time_to_days_since_1970($t) { !defined $t? undef : int($t / 86400) }
-sub _days_since_1970_to_time($d) { !defined $d? undef : $d * 86400; }
+sub _time_to_days_since_1970($t) { !length $t? undef : int($t / 86400) }
+sub _days_since_1970_to_time($d) { !length $d? undef : $d * 86400; }
 
 sub _parse_linux_passwd_format($self, $files) {
    my @users;
