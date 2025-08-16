@@ -25,6 +25,7 @@ use v5.26;
 use warnings;
 use experimental qw( signatures );
 use parent 'Sys::Export::Unix';
+use Cwd 'abs_path';
 use Carp;
 
 =method add_passwd
@@ -104,12 +105,10 @@ sub add_localtime($self, $tz_name) {
       # zoneinfo is exported, and includes this timezone, so symlink to it
       $self->add([ sym => "etc/localtime" => "../usr/share/zoneinfo/$tz_name" ]);
    }
-   elsif (my ($path)= grep -e $_,
-      $self->src_abs . "usr/share/zoneinfo/$tz_name",
-      "/usr/share/zoneinfo/$tz_name"
-   ) {
-      # resolve symliks down to actual file
-      $path= abs_path($path) || croak "Broken symlink at $path";
+   elsif (defined (my $src_path= $self->_src_abs_path("usr/share/zoneinfo/$tz_name"))) {
+      $self->add([ file644 => 'etc/localtime', { data_path => $self->src_abs . $src_path } ]);
+   }
+   elsif (defined (my $path= abs_path("/usr/share/zoneinfo/$tz_name"))) {
       $self->add([ file644 => 'etc/localtime', { data_path => $path } ]);
    }
    else {
