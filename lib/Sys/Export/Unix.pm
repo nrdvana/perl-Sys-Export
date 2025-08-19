@@ -633,7 +633,7 @@ sub add {
          # "/bin" rather than "../bin" it will fail whenever ->src is not pointed to '/'.
          my $real_src_path= $file{real_src_path} // $self->_src_parent_abs_path($src_path);
          if (!defined $real_src_path) {
-            $self->{_log_debug}->("Couldn't resolve real path for '$src_path'") if $self->{_log_debug};
+            croak "No such path $src_path";
          } elsif ($real_src_path ne $src_path) {
             $self->{_log_debug}->("Resolved to '$real_src_path'") if $self->{_log_debug};
             # ignore repeat requests
