@@ -108,8 +108,8 @@ use POSIX ();
 require Sys::Export::Exporter;
 our @CARP_NOT= qw( Sys::Export );
 our @ISA= qw( Sys::Export::Exporter );
-our $have_file_map= eval { require File::Map; };
-our $have_unix_mknod= eval { require Unix::Mknod; };
+our $have_file_map= !!eval { require File::Map };
+our $have_unix_mknod= !!eval { require Unix::Mknod; };
 
 sub new {
    my $class= shift;
@@ -160,10 +160,17 @@ sub new {
       }
    }
 
+   $attrs{src_exe_PATH} //= "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                          . ($abs_src eq '/'? ":$ENV{PATH}" : '');
+
    my $self= bless \%attrs, $class;
 
    $self->_build_log_fn($self->{log} //= 'info');
-
+   # Run the accessor logic to initialize the parameter
+   for my $method (qw( src_exe_PATH )) {
+      $self->$method(delete $self->{$method});
+   }
+   # Special cases - call the method once for each key/value pair
    for my $method (qw( rewrite_path rewrite_user rewrite_group )) {
       my $r= delete $self->{$method}
          or next;
@@ -181,6 +188,27 @@ paths inside this filesystem, or things will break.
 =attribute src_abs
 
 The C<abs_path> of the root of the source filesystem, always ending with '/'.
+
+=attribute src_exe_PATH
+
+A string like the Unix PATH environment variable which lists the directories to search for
+executables.  Each directory path is relative to the C<src> dir.
+
+The default path begins with "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin".
+This is opposite of many systems, but it means your overrides take precedence over things
+that might have been aded to the host system without you realizing they were there, which seems
+like the helpful thing to do when building custom Linux images.
+
+If C<src> is "/", the actual host C<$PATH> is appended to that.
+
+When you set a new value (or the initial value from the constructor) for this variable, it
+performs sanitization and deduplication of the paths.   The actual value is stored in list form
+at L</src_exe_PATH_list>, but reading this attribute re-joins them with colons.
+
+=attribute src_exe_PATH_list
+
+Same logical value as C<src_exe_PATH>, but returns a list of paths relative to C<src>, useful
+for iteration.
 
 =attribute src_userdb
 
@@ -247,6 +275,23 @@ sub dst_uid_used($self) { $self->{dst_uid_used} //= {} }
 sub dst_gid_used($self) { $self->{dst_gid_used} //= {} }
 sub src_userdb($self)   { $self->{src_userdb} }
 sub dst_userdb($self)   { $self->{dst_userdb} }
+
+sub src_exe_PATH($self, @value) {
+   $self->src_exe_PATH_list(map split(/:/, $_, -1), @value) if @value;
+   return join ':', map "/$_", $self->src_exe_PATH_list;
+}
+
+sub src_exe_PATH_list($self, @value) {
+   if (@value) {
+      for (grep length, @value) {
+         $_= $self->_src_abs_path($_); # resolve symlinks
+         $_= undef unless length && -d $self->src_abs . $_;
+      }
+      my %seen;
+      $self->{src_exe_PATH_list}= [ grep length && !$seen{$_}++, @value ];
+   }
+   return @{ $self->{src_exe_PATH_list} // [] };
+}
 
 =attribute path_rewrite_regex
 
@@ -622,7 +667,7 @@ sub add {
       # Translate src to dst if user didn't supply a 'name'
       if (!defined $file{name} || !defined $file{mode}) {
          my $src_path= $file{src_path};
-         defined $src_path or croak(defined $file{mode}? "Require src_path to determine 'mode'" : "Require 'name' (or 'src_path' to derive name)");
+         defined $src_path or croak(!defined $file{mode}? "Require src_path to determine 'mode'" : "Require 'name' (or 'src_path' to derive name)");
          # ignore repeat requests
          if (exists $self->{src_path_set}{$src_path} && !defined $file{name}) {
             $self->{_log_debug}->("  (already exported '$src_path')") if $self->{_log_debug};
@@ -854,6 +899,21 @@ sub src_find($self, @paths) {
       }
    }
    return @ret;
+}
+
+=method src_which
+
+Like the unix command 'which', scan through a list of executable directories looking for
+an executable of the given name.  The paths are set in attribute L</src_exe_PATH>.
+
+=cut
+
+sub src_which($self, $name) {
+   $name =~ m,/, and croak '->src_which($name) should not include a path separator';
+   for ($self->src_exe_PATH_list) {
+      return "$_/$name" if -x $self->src_abs . "$_/$name";
+   }
+   return undef;
 }
 
 =method skip

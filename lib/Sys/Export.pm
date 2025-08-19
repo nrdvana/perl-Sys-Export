@@ -19,12 +19,12 @@ BEGIN {
 }
 our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
-   add skip find finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
+   add skip find which finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
    S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
    S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
 );
 our %EXPORT_TAGS= (
-   basic_methods => [qw( exporter add skip find finish rewrite_path rewrite_user rewrite_group )],
+   basic_methods => [qw( exporter add skip find which finish rewrite_path rewrite_user rewrite_group )],
    isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_int )],
    stat_modes => [qw( S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT )],
    stat_tests => [qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT )],
@@ -219,6 +219,8 @@ the global exporter object get exported as functions:
 
 =item L<find|Sys::Export::Unix/src_find>
 
+=item L<which|Sys::Export::Unix/src_which>
+
 =item L<finish|Sys::Export::Unix/finish>
 
 =item L<rewrite_path|Sys::Export::Unix/rewrite_path>
@@ -234,6 +236,7 @@ the global exporter object get exported as functions:
 sub add           { $exporter->add(@_) }
 sub skip          { $exporter->skip(@_) }
 sub find          { $exporter->src_find(@_) }
+sub which :prototype($) { $exporter->src_which(@_) }
 sub finish        { $exporter->finish(@_) }
 sub rewrite_path  { $exporter->rewrite_path(@_) }
 sub rewrite_user  { $exporter->rewrite_user(@_) }
