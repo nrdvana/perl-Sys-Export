@@ -1111,15 +1111,46 @@ sub _export_file($self, $file) {
          _load_or_map_file($file->{data}, $file->{data_path});
       }
       my @notes;
-      # Check for ELF signature or script-interpreter
-      if (substr($file->{data}, 0, 4) eq "\x7fELF") {
-         $self->_export_elf_file($file, \@notes);
-      } elsif ($file->{data} =~ m,^#!\s*/,) {
-         $self->_export_script_file($file, \@notes);
-      }
+      $self->process_file($file, \@notes)
+         if length $file->{src_path};
       $self->_log_action("CPY", $file->{src_path} // '(data)', $file->{name}, @notes);
    }
    $self->_dst->add($file);
+}
+
+=method process_file
+
+  $exporter->process_file(\%file_attributes, \@notes);
+
+This method is called any time a source file is being written to the destination.
+It is only called automatically for file entries with a C<< ->{src_path} >> attribute.
+Files without that attribute are assumed to be prepared for the destination already.
+Processing is only performed once per inode, in the case of multiple hardlinks.
+
+When called, the C<< $file->{data} >> has already been loaded (or mem-mapped).  If you need to
+modify it, be sure to C<< delete $file->{data} >> and replace it with a new value, since the
+memory-map is read-only.
+
+The C<@notes> parameter is an arrayref of flags to be added to the logging, to let the user
+know what processing steps were performed on the file.
+
+The return value is unused.
+
+This general method dispatches to more specific methods based on the file type.
+If you want to add special processing for additional types of files, this is the method you'd
+override.
+
+=cut
+
+sub process_file($self, $file, $notes) {
+   # Check for ELF signature or script-interpreter
+   if (substr($file->{data}, 0, 4) eq "\x7fELF") {
+      $self->{_log_trace}->("Detected ELF signature in '$file->{name}'") if $self->{_log_trace};
+      $self->process_elf_file($file, $notes);
+   } elsif ($file->{data} =~ m,^#!\s*/(\S+),) {
+      $self->{_log_trace}->("Detected script interpreter '$1' in '$file->{name}'") if $self->{_log_trace};
+      $self->process_script_file($file, $notes);
+   }
 }
 
 sub _resolve_src_library($self, $libname, $rpath) {
@@ -1135,7 +1166,16 @@ sub _resolve_src_library($self, $libname, $rpath) {
    return ();
 }
 
-sub _export_elf_file($self, $file, $notes) {
+=method process_elf_file
+
+A variant of L</process_file> for ELF-format files. (Unix binaries and shared libraries)
+
+This adds any shared library dependencies of the file, and if the file path is getting
+rewritten it also calls 'patchelf' to change the path to the interpreter and/or lib dir.
+
+=cut
+
+sub process_elf_file($self, $file, $notes) {
    require Sys::Export::ELF;
    my $elf= Sys::Export::ELF::unpack($file->{data});
    my ($interpreter, @libs);
@@ -1191,13 +1231,21 @@ sub _export_elf_file($self, $file, $notes) {
    }
 }
 
-sub _export_script_file($self, $file, $notes) {
+=method process_script_file
+
+A variant of L</process_file> for any file with "#!/..." interpreter.
+
+This adds the interpreter to the export queue, and also may dispatch to a more specialized
+processing method.
+
+=cut
+
+sub process_script_file($self, $file, $notes) {
    # Make sure the interpreter is added, and also rewrite its path
    my ($interp)= ($file->{data} =~ m,^#!\s*/(\S+),)
       or return;
    $self->add($interp);
-
-   if ($self->_has_rewrites && length $file->{src_path}) {
+   if ($self->_has_rewrites) {
       # rewrite the interpreter, if needed
       my $rre= $self->path_rewrite_regex;
       if ($interp =~ s,^$rre,$self->{path_rewrite_map}{$1},e) {
@@ -1206,28 +1254,93 @@ sub _export_script_file($self, $file, $notes) {
          $file->{data}= $data;
          push @$notes, '+rewrite interpreter';
       }
+   }
+   if ($interp =~ m,/env\z,) { # /usr/bin/env, request for interpreter from $PATH...
+      my ($name)= ($file->{data} =~ m,^#!\s*/\S+\s*(\S+),)
+         or return;
+      if (defined (my $path= $self->src_which($name))) {
+         $self->add($path);
+         $interp= $path;
+         $self->{_log_trace}->("Detected secondary script interpreter '$path' in '$file->{name}'") if $self->{_log_trace};
+      } else {
+         $self->{_log_trace}->("Detected secondary script interpreter '$1' in '$file->{name}' but can't locate it") if $self->{_log_trace};
+      }
+   }
+
+   $file->{interpreter}= $interp;
+   if ($interp =~ m,/perl[0-9.]*\z,) {
+      $self->process_perl_file($file, $notes);
+   }
+   elsif ($interp =~ m,/(bash|ash|dash|sh)\z,) {
+      $self->process_shell_file($file, $notes);
+   }
+   elsif ($self->_has_rewrites && $file->{data} =~ $self->path_rewrite_regex) {
+      warn "$file->{src_path} is a script referencing a rewritten path, but don't know how to process it\n";
+      push @$notes, "+can't rewrite!";
+   }
+}
+
+=method process_shell_file
+
+A variant of L</process_file> for any file with a known command-shell interpreter.
+
+=cut
+
+sub process_shell_file($self, $file, $notes) {
+   # This takes the bold step of attempting to rewrite paths seen in the script
+   if ($self->_has_rewrites) {
+      my $rre= $self->path_rewrite_regex;
       # Scan the source for paths that need rewritten
       if ($file->{data} =~ $rre) {
-         # Rewrite paths in shell scripts, but only warn about others.
-         # Rewriting perl scripts would basically require a perl parser...
-         if ($interp =~ m,/(bash|ash|dash|sh)$,) {
-            my ($interp_line, $body)= split "\n", $file->{data}, 2;
-            $body= $self->_rewrite_shell($body, $interp_line);
-            $file->{data}= "$interp_line\n$body";
-            push @$notes, '+rewrite paths';
-         } else {
-            warn "$file->{src_path} is a script referencing a rewritten path, but don't know how to process it\n";
-            push @$notes, "+can't rewrite!";
-         }
+         my ($interp_line, $body)= split "\n", $file->{data}, 2;
+         # only replace path matches when following certain characters which
+         # indicate the start of a path.
+         $body =~ s/(?<=[ '"><\n#])$rre/$self->{path_rewrite_map}{$1}/ge;
+         $file->{data}= "$interp_line\n$body";
+         push @$notes, '+rewrite paths';
       }
    }
 }
 
-sub _rewrite_shell($self, $contents, $interpreter) {
-   my $rre= $self->path_rewrite_regex;
-   # only replace path matches when following certain characters which
-   # indicate the start of a path.
-   $contents =~ s/(?<=[ '"><\n#])$rre/$self->{path_rewrite_map}{$1}/ger;
+=method process_perl_file
+
+A variant of L</process_file> for any perl script or module.
+
+=cut
+
+sub _get_perl_script_deps($self, $file) {
+   my $interp= $file->{interpreter} // $self->src_which('perl');
+   $self->{_log_trace}->("Checking perl script $file->{name} for dependencies") if $self->{_log_trace};
+   # We can run the actual perl interpreter with '-c' on this file, so long as
+   # src_path is defined and an strace implementation is available.
+   if ($self->_can_trace_deps && length $file->{src_path}) {
+      # If file appears to be a module, ensure module's own path root is in perl's @INC
+      my @inc;
+      if ($file->{src_path} =~ /.pm\z/) {
+         if ($file->{data} =~ /^(package|class) (\S+)/m) {
+            my $path= ($1 =~ s,::,/,gr).'.pm';
+            if (substr($file->{src_path}//'', -length $path) eq $path) {
+               push @inc, substr($file->{src_path}, 0, -length $path);
+            }
+         }
+      }
+      my @cmd= ($interp, '-c', (map "-I$_", @inc), $file->{src_path} );
+      $self->{_log_debug}->("Tracing perl deps with @cmd") if $self->{_log_debug};
+      my $deps= eval { $self->_trace_deps(@cmd) };
+      return sort keys %$deps if defined $deps;
+      $self->{_log_debug}->("strace failed: $@") if $self->{_log_debug};
+   }
+   
+   $self->{_log_trace}->("strace unavailable, falling back to source scan") if $self->{_log_trace};
+   return;
+}
+
+sub process_perl_file($self, $file, $notes) {
+   $self->add($self->_get_perl_script_deps($file));
+   if ($self->_has_rewrites && $file->{data} =~ $self->path_rewrite_regex) {
+      warn "$file->{src_path} is a script referencing a rewritten path, but don't know how to process it\n";
+      push @$notes, "+can't rewrite!";
+   }
 }
 
 sub _export_dir($self, $dir) {
