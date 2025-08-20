@@ -293,6 +293,52 @@ sub src_exe_PATH_list($self, @value) {
    return @{ $self->{src_exe_PATH_list} // [] };
 }
 
+#=attribute _can_run_in_src
+#
+#This is a boolean that indicates whether executable in the source directory can be executed
+#on this host.  This is always true if "src" is '/', since perl wouldn't be able to run in this
+#environment to run Sys::Export if that weren't true.  If src is any other path, this module
+#needs 'chroot' permission, and tests using C<< chroot $srcdir /bin/sh -c 'exit 0' >>.
+#
+#=cut
+
+sub _can_run_in_src($self) {
+   $self->{can_run_in_src} //= ($self->src_abs eq '/' or eval { $self->_run_in_src('sh','-c','exit 0'); 1 });
+}
+sub _run_in_src($self, $cmd, @args) {
+   my $src_abs= $self->src_abs;
+   if ($cmd !~ m,/, && !-x $src_abs . $cmd) { # not an absolute path
+      my $path= $self->src_which($cmd)
+         // croak "Can't locate '$cmd' under $src_abs in PATH=".$self->src_exe_PATH;
+      $cmd= $path;
+   }
+   pipe(my $err_r, my $err_w) // croak "pipe: $!";
+   my $pid= fork() // croak "fork: $!";
+   if (!$pid) {
+      eval {
+         if ($src_abs ne '/') {
+            chdir $src_abs // die "chdir($src_abs): $!";
+            chroot $src_abs // die "chroot($src_abs): $!";
+         }
+         exec($cmd, @args) // die "exec: $!";
+      };
+      $err_w->print($@);
+      $err_w->close;
+      POSIX::_exit(1);
+   }
+   else {
+      local $/;
+      my $err= <$err_r>;
+      if (length $err) {
+         waitpid($pid, 0);
+         die $err;
+      }
+      # else command is running
+      waitpid($pid, 0);
+      return $?;
+   }
+}
+
 =attribute path_rewrite_regex
 
 A regex that matches the longest prefix of a source path having a rewrite rule.
@@ -314,6 +360,25 @@ sub _link_map($self) { $self->{link_map} //= {} }
 # a hashref listing all the interpreters that have been discovered for programs
 # and scripts copied to dst.  The keys are the relative source path.
 sub _elf_interpreters($self) { $self->{elf_interpreters} //= {} }
+
+# Can we use strace (or similar) on binaries in src to see all files they touch?
+sub _can_trace_deps($self) {
+   $self->{_can_trace_deps} //= do {
+      eval { $self->{_trace_deps} //= $self->_build__trace_deps };
+      $self->{_log_debug}->("Error building _trace_deps function: $@")
+         if $self->{_log_debug} && !defined $self->{_trace_deps};
+      !!$self->{_trace_deps};
+   };
+}
+
+sub _trace_deps($self, @argv) {
+   ($self->{_trace_deps} //= $self->_build__trace_deps)->($self, @argv);
+}
+
+sub _build__trace_deps {
+   # ::Linux subclass overrides this, for strace support.
+   croak "No options available for tracing runtime dependencies";
+}
 
 sub DESTROY($self, @) {
    $self->finish if $self->{_delayed_apply_stat};
