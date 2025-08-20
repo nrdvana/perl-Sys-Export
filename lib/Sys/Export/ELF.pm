@@ -105,7 +105,7 @@ our @relocation_addend_packstr= (
 );
 
 sub _strz_from_offset {
-   return undef unless 0 <= $_[1] < length $_[0];
+   return undef unless 0 <= $_[1] && $_[1] < length $_[0];
    pos $_[0] = $_[1];
    $_[0] =~ /\G([^\0]*)/? $1 : undef;
 }
@@ -132,8 +132,8 @@ sub unpack {
    # Start with the encoding-independent fields
    @elf{@elf_common_header_fields}= unpack($elf_common_header_packstr, $_[0]);
    $elf{magic} eq "\x7FELF" or return undef;
-   die "Unsupported 'class'" unless 1 <= $elf{class} <= 2;
-   die "Unsupported 'data'" unless 1 <= $elf{data} <= 2;
+   die "Unsupported 'class'" unless 1 <= $elf{class} && $elf{class} <= 2;
+   die "Unsupported 'data'" unless 1 <= $elf{data} && $elf{data} <= 2;
    my $encoding_idx= ($elf{class}-1)*2 + ($elf{data}-1);
 
    # Now decode the endian and bit-length-varying fields
@@ -211,7 +211,7 @@ sub unpack {
             }
          }
          if (defined $elf{string_table_offset}) {
-            # now that string table is known, decode the libraary_needed
+            # now that string table is known, decode the needed_libraries
             my @needed;
             for (@dynamic_entries) {
                if ($_->{tag} eq 'NEEDED') {
