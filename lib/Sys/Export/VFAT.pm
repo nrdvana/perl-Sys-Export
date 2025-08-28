@@ -27,6 +27,7 @@ use constant {
 use Exporter 'import';
 our @EXPORT_OK= qw( FAT12 FAT16 FAT32 ATTR_READONLY ATTR_HIDDEN ATTR_SYSTEM ATTR_ARCHIVE );
 use Sys::Export ':isa';
+require Sys::Export::VFAT::Geometry;
 
 =head1 SYNOPSIS
 
@@ -189,6 +190,7 @@ my sub _round_up_pow2($number) {
    $number |= $number >> 32;
    return $number+1;
 }
+my sub isa_pow2($number) { $number == _round_up_pow2($number-1) }
 my sub _round_up_to_alignment($number, $pow2) {
    my $mask= $pow2-1;
    return ($number + $mask) & ~$mask;
@@ -278,12 +280,20 @@ sub _resolve_cluster($file, $cl_id) {
    $_->($cl_id) for @{$cluster_ref}[1..$#$cluster_ref];
 }
 
-sub _write_clusters($fh, $geom, $cluster_id, $count, $data_ref, $data_ofs) {
-   sysseek($fh, $geom->get_cluster_offset($cluster_id), 0)
-      or croak "sysseek: $!";
-   my $size= $count * $geom->bytes_per_cluster;
-   my $wrote= syswrite($fh, $$data_ref, $size, $data_ofs);
-   croak "unexpected short write" syswrite: $!if ($wrote != $size)
+sub _write_clusters {
+   my ($fh, $geom, $alloc_invlist)= (shift, shift, shift);
+   my $data_ofs= 0;
+   for (my $i= 0; $i < @$alloc_invlist; $i += 2) {
+      my ($cl_start, $cl_lim)= @{$alloc_invlist}[$i, $i+1];
+      sysseek($fh, $geom->get_cluster_offset($cl_start), 0)
+         or croak "sysseek: $!";
+      my $size= ($cl_lim-$cl_start) * $geom->bytes_per_cluster;
+      $size= length($_[0]) - $data_ofs
+         if length($_[0]) - $data_ofs < $size;
+      my $wrote= syswrite($fh, $_[0], $size, $data_ofs);
+      croak "syswrite: $!" if !defined $wrote;
+      croak "Unexpected short write" if $wrote != $size;
+      $data_ofs += $wrote;
    }
 }
 
@@ -310,19 +320,19 @@ sub finish($self) {
       my $alloc_invlist= $alloc->alloc_byte_range($f->{FAT_offset}, $f->{size}, $geom)
          or croak "Failed to allocate FAT_offset = $f->{FAT_offset}";
       _resolve_cluster($f, $alloc_invlist->[0]);
-      _write_clusters($fh, $f->{data}, $geom, $alloc_invlist);
+      _write_clusters($fh, $geom, $alloc_invlist, $f->{data});
    }
    for my $f (grep $_->{FAT_align} && !$_->{FAT_cluster}[0], @files) {
       my $alloc_invlist= $alloc->alloc_byte_contiguous($_->{size}, $_->{FAT_align}, $geom)
          or croak "BUG: not enough contiguous clusters for aligned file $_->{uname}";
       _resolve_cluster($f, $alloc_invlist->[0]);
-      _write_clusters($fh, $f->{data}, $geom, $alloc_invlist);
+      _write_clusters($fh, $geom, $alloc_invlist, $f->{data});
    }
    for my $f (grep !$_->{FAT_cluster}[0], @files, @dirs) {
       my $alloc_invlist= $alloc->alloc(ceil($_->{size}/$cluster_size))
          or croak "BUG: not enough clusters for $_->{uname}";
       _resolve_cluster($f, $alloc_invlist->[0]);
-      _write_clusters($fh, $f->{data}, $geom, $alloc_invlist);
+      _write_clusters($fh, $geom, $alloc_invlist, $f->{data});
    }
    
    # Encode the boot sector
@@ -335,13 +345,13 @@ sub finish($self) {
    ...;
    # Pack the FAT then store each copy
    my $fat;
-   if ($best_geom->bits == FAT12) {
+   if ($geom->bits == FAT12) {
       ...
    } else {
-      $fat= pack(($best_geom->bits == FAT16? 'v*':'V*'), @fat);
+      $fat= pack(($geom->bits == FAT16? 'v*':'V*'), @$fat);
    }
-   for my $i (0..($best_geom->fat_count-1)) {
-      sysseek($fh, $best_geom->get_fat_offset($i, 0), 0);
+   for my $i (0..($geom->fat_count-1)) {
+      sysseek($fh, $geom->get_fat_offset($i, 0), 0);
       syswrite($fh, $fat);
    }
    ...
@@ -501,8 +511,6 @@ sub _optimize_geometry($self, $files, $dirs) {
             }
             # Not enough clusters?  Try again with more.
             if (defined $max_ofs && $max_ofs > $trial_geom->total_size) {
-               $end += $cluster_size - ($end % $cluster_size)
-                  if $end % $cluster_size;
                # This might overshoot a bit since the tables also grow and push forward the
                # whole data area.
                $clusters= ceil(($max_ofs - $trial_geom->data_offset) / $cluster_size);
@@ -519,6 +527,7 @@ sub _optimize_geometry($self, $files, $dirs) {
                for @other_files, @$dirs;
             if ($alloc->max_cluster_used > $trial_geom->max_cluster_idx) {
                $clusters= $alloc->max_cluster_used;
+               goto retry;
             }
          }
          $geom= $trial_geom
@@ -680,318 +689,6 @@ sub _pack_dir($self, $dir) {
    # but that will happen automatically later as the data is appended to the file..
 }
 
-package Sys::Export::VFAT::Geometry {
-   use v5.26;
-   use warnings;
-   use experimental qw( signatures );
-   use Sys::Export ':isa';
-   use Carp;
-   BEGIN {
-      *FAT12= *Sys::Export::VFAT::FAT12;
-      *FAT16= *Sys::Export::VFAT::FAT16;
-      *FAT32= *Sys::Export::VFAT::FAT32;
-      our %valid_bytes_per_sector= ( 512 => 1, 1024 => 1, 2048 => 1, 4096 => 1 );
-      our %valid_sectors_per_cluster= ( map +($_ => 1), qw( 1 2 4 8 16 32 64 128 ));
-   }
-   use constant {
-      FAT12_MAX_CLUSTERS       => 4085-1,
-      FAT12_IDEAL_MAX_CLUSTERS => 4085-16,
-      FAT16_MIN_CLUSTERS       => 4085,
-      FAT16_IDEAL_MIN_CLUSTERS => 4085+16,
-      FAT16_MAX_CLUSTERS       => 65525-1,
-      FAT16_IDEAL_MAX_CLUSTERS => 65525-16,
-      FAT32_MIN_CLUSTERS       => 65525,
-      FAT32_IDEAL_MIN_CLUSTERS => 65525+16,
-      FAT32_MAX_CLUSTERS       => (1<<28)-3,
-   };
-   our %valid_bytes_per_sector;
-   our %valid_sectors_per_cluster;
-
-   sub new($class, @attrs) {
-      my %attrs= @attrs == 1 && isa_hash $attrs[0]? %{$attrs[0]} : @attrs;
-      my ($bytes_per_sector, $sectors_per_cluster, $fat_count,     $reserved_sector_count,
-          $fat_sector_count, $root_dirent_count,   $cluster_count, $total_sector_count, $bits)
-         = delete @attrs{qw(
-           bytes_per_sector   sectors_per_cluster   fat_count       reserved_sector_count
-           fat_sector_count   root_dirent_count     cluster_count   total_sector_count   bits
-         )};
-
-      $valid_bytes_per_sector{$bytes_per_sector //= 512}
-         or croak "Invalid bytes_per_sector";
-
-      # Default sectors_per_cluster to whatever makes 4K
-      $sectors_per_cluster //= ($bytes_per_sector >= 4096? 1 : 4096 / $bytes_per_sector);
-      $valid_sectors_per_cluster{$sectors_per_cluster}
-         or croak "Invalid sectors_per_cluster";
-      $bytes_per_sector * $sectors_per_cluster <= 32*1024
-         or carp "Warning: bytes_per_sector * sectors_per_cluster > 32KiB which is not valid for some drivers";
-
-      # Default fat_count to 2 unless specified otherwise
-      $fat_count //= 2;
-      isa_int $fat_count && 0 < $fat_count && $fat_count <= 255
-         or croak "Invalid fat_count";
-
-      my $self= bless {
-         bytes_per_sector    => $bytes_per_sector,
-         sectors_per_cluster => $sectors_per_cluster,
-         fat_count           => $fat_count,
-      };
-      
-      # From here down, we are either determining cluster_count from other properties,
-      # or deriving other properties from cluster_count.
-      if (defined $reserved_sector_count && defined $fat_sector_count
-       && defined $root_dirent_count && defined $total_sector_count
-      ) {
-         # All main properties of the geometry are defined.
-         my $root_sector_count= int(($root_dirent_count + ($self->dirent_per_sector-1)) / $self->dirent_per_sector);
-         my $data_sectors= $total_sector_count - $reserved_sector_count - $fat_count * $fat_sector_count - $root_sector_count;
-         my $calc_cluster_count= int($data_sectors / $sectors_per_cluster);
-         croak "Supplied cluster_count disagrees with computed value"
-            if defined $cluster_count && $cluster_count != $calc_cluster_count;
-         $cluster_count //= $calc_cluster_count;
-      }
-      elsif (defined $cluster_count) {
-         isa_int $cluster_count && $cluster_count > 0
-            or croak "Invalid cluster_count '$cluster_count'";
-         # FAT docs recommend avoiding numbers near the boundary of FAT12/FAT16/FAT32 to avoid
-         # other people's math errors.  But, allow the caller to disable this adjustment.
-         unless (delete $attrs{exact_cluster_count}) {
-            if ($cluster_count >= FAT12_IDEAL_MAX_CLUSTERS && $cluster_count < FAT16_IDEAL_MIN_CLUSTERS) {
-               $cluster_count= FAT16_IDEAL_MIN_CLUSTERS;
-            } elsif ($cluster_count >= FAT16_IDEAL_MAX_CLUSTERS && $cluster_count < FAT32_IDEAL_MIN_CLUSTERS) {
-               $cluster_count= FAT32_IDEAL_MIN_CLUSTERS;
-            }
-            
-            # But also, increase to the minimum number of clusters if a specific number of bits
-            # was requested.
-            if (my $min_bits= delete $attrs{min_bits}) {
-               $cluster_count= FAT32_IDEAL_MIN_CLUSTERS if $attrs{min_bits} == FAT32 && $cluster_count < FAT32_IDEAL_MIN_CLUSTERS;
-               $cluster_count= FAT16_IDEAL_MIN_CLUSTERS if $attrs{min_bits} == FAT16 && $cluster_count < FAT16_IDEAL_MIN_CLUSTERS;
-            }
-         }
-      }
-      else {
-         croak "Not enough attributes supplied to determine geometry";
-      }
-      $self->{cluster_count}= $cluster_count;
-
-      # These are the official boundary numbers that determine the filesystem type
-      my $calc_bits= $cluster_count < FAT16_MIN_CLUSTERS? FAT12
-                   : $cluster_count < FAT32_MIN_CLUSTERS? FAT16
-                   : FAT32;
-      croak "cluster_count $cluster_count implies $calc_bits, which conflicts with requested $bits"
-         if defined $bits && $bits != $calc_bits;
-      $self->{bits}= $bits= $calc_bits;
-
-      # Check how many sectors are occupied by each allocation table
-      my $fat_byte_count= ( ($cluster_count + 2) * $bits + 7 ) >> 3; # round up to bytes
-      if (defined $fat_sector_count) {
-         $fat_sector_count * $bytes_per_sector >= $fat_byte_count
-            or croak "Invalid fat_sector_count, smaller than $fat_byte_count bytes";
-      } else {
-         $fat_sector_count= int(($fat_byte_count + ($bytes_per_sector - 1)) / $bytes_per_sector);
-      }
-      $self->{fat_sector_count}= $fat_sector_count;
-
-      # Check how many sectors are occupied by root directory entries
-      # For fat12/16, The FAT spec document suggests 512 as a good default
-      # Allow the user to supply the actual number of root entries and then we round that.
-      my $used_root_dirent_count= delete $attrs{used_root_dirent_count};
-      if ($bits < FAT32) {
-         if (defined $root_dirent_count) {
-            $root_dirent_count >= 1 && $root_dirent_count < 0xFFFF
-               or croak "Invalid root_dirent_count for FAT12/16";
-         } else {
-            $root_dirent_count= $used_root_dirent_count // 512;
-            # Round up to as many as fit in this number of sectors
-            my $remainder= ($root_dirent_count & ($self->dirent_per_sector - 1));
-            $root_dirent_count += ($self->dirent_per_sector - $remainder)
-               if $remainder;
-         }
-         
-         ($reserved_sector_count //= 1) == 1
-            or croak "reserved_sector_count should be 1 for FAT12/16";
-      } else {
-         ($root_dirent_count //= 0) == 0
-            or croak "root_dirent_count must be zero for FAT32";
-
-         $reserved_sector_count //= 32;
-         isa_int $reserved_sector_count && $reserved_sector_count >= 2
-            or croak "reserved_sector_count must be greater than 2 for FAT32";
-      }
-      $self->{root_dirent_count}= $root_dirent_count;
-      $self->{reserved_sector_count}= $reserved_sector_count;
-      
-      carp "Unused constructor parameters: ".join(' ', keys %attrs)
-         if keys %attrs;
-      $self;
-   }
-
-   sub bytes_per_sector    { $_[0]{bytes_per_sector} }
-   sub sectors_per_cluster { $_[0]{sectors_per_cluster} }
-   sub dirent_per_sector   { $_[0]{bytes_per_sector} / 32 }
-   sub dirent_per_cluster  { $_[0]{bytes_per_sector} * $_[0]{sectors_per_cluster} / 32 }
-
-   sub bits                  { $_[0]{bits} }
-   sub reserved_sector_count { $_[0]{reserved_sector_count} }
-   sub fat_count             { $_[0]{fat_count} }
-   sub fat_sector_count      { $_[0]{fat_sector_count} }
-   sub cluster_count         { $_[0]{cluster_count} }
-
-   sub root_dirent_count     { $_[0]{root_dirent_count} }
-   sub root_sector_count($self) {
-      $self->{root_sector_count} //= int(($self->root_dirent_count + ($self->dirent_per_sector-1)) / $self->dirent_per_sector);
-   }
-
-   sub data_first_sector($self) {
-      $self->{data_first_sector} //= $self->reserved_sector_count
-         + $self->fat_count * $self->fat_sector_count
-         + $self->root_sector_count;
-   }
-   sub data_sector_count($self) {
-      $self->total_sector_count - $self->data_first_sector;
-   }
-   sub total_sector_count($self) {
-      $self->{total_sector_count} //= $self->data_first_sector
-         + $self->cluster_count * $self->sectors_per_cluster;
-   }
-   sub min_cluster_idx { 2 }
-   sub max_cluster_idx { $_[0]->cluster_count + 1 }
-   sub get_cluster_first_sector($self, $cluster_idx) {
-      croak "Cluster 0 and 1 are reserved" unless $cluster_idx > 1;
-      croak "Cluster $cluster_idx beyond end of volume" if $cluster_idx > $self->max_cluster_idx;
-      return $self->data_first_sector + ($cluster_idx-2) * $self->sectors_per_cluster;
-   }
-   sub get_cluster_of_sector($self, $sector_idx) {
-      return undef if $sector_idx < $self->data_first_sector;
-      my $cluster= int(($sector_idx - $self->data_first_sector) / $self->sectors_per_cluster);
-      return undef if $cluster >= $self->cluster_count;
-      return $cluster + 2;
-   }
-
-   # byte-based aliases
-   sub total_size($self) { $self->total_sector_count * $self->bytes_per_sector }
-   sub data_offset($self) { $self->data_first_sector * $self->bytes_per_sector }
-   sub get_cluster_offset($self, $cluster_id) {
-      return $self->get_cluster_first_sector($cluster_id) * $self->bytes_per_sector;
-   }
-   sub get_cluster_of_offset($self, $offset) {
-      return $self->get_cluster_of_sector(int($offset / $self->bytes_per_sector));
-   }
-   
-   our @sector0_fields_common= (
-      [ BS_jmpBoot     =>    0,  3, 'a3', '' ],
-      [ BS_OEMName     =>    3,  8, 'a8', 'MSWIN4.1' ],
-      [ BPB_BytsPerSec =>   11,  2, 'v' ],
-      [ BPB_SecPerClus =>   13,  1, 'C' ],
-      [ BPB_RsvdSecCnt =>   14,  2, 'v' ],
-      [ BPB_NumFATs    =>   16,  1, 'C' ],
-      [ BPB_RootEntCnt =>   17,  2, 'v' ],
-      [ BPB_TotSec16   =>   19,  2, 'v' ],
-      [ BPB_Media      =>   21,  1, 'C', 0xF8 ],
-      [ BPB_FATSz16    =>   22,  2, 'v' ],
-      [ BPB_SecPerTrk  =>   24,  2, 'v', 0 ],
-      [ BPB_NumHeads   =>   26,  2, 'v', 0 ],
-      [ BPB_HiddSec    =>   28,  4, 'V', 0 ],
-      [ BPB_TotSec32   =>   32,  4, 'V'  ]
-   );
-   our @sector0_fat16_fields= (
-      @sector0_fields_common,
-      [ BS_DrvNum      =>   36,  1, 'C', 0x80 ],
-      [ BS_Reserved1   =>   37,  1, 'C', 0 ],
-      [ BS_BootSig     =>   38,  1, 'C', 0x29 ],
-      [ BS_VolID       =>   39,  4, 'V' ],
-      [ BS_VolLab      =>   43, 11, 'A11', 'NO NAME' ],
-      [ BS_FilSysType  =>   54,  8, 'A8' ],
-      [ _signature     =>  510,  2, 'v', 0xAA55 ],
-   );
-   our @sector0_fat32_fields= (
-      @sector0_fields_common,
-      [ BPB_FATSz32    =>   36,  4, 'V' ],
-      [ BPB_ExtFlags   =>   40,  2, 'v', 0 ],
-      [ BPB_FSVer      =>   42,  2, 'v', 0 ],
-      [ BPB_RootClus   =>   44,  4, 'V' ],
-      [ BPB_FSInfo     =>   48,  2, 'v' ],
-      [ BPB_BkBootSec  =>   50,  2, 'v', 0 ],
-      [ BPB_Reserved   =>   52, 12, 'a12', 0 ],
-      [ BS_DrvNum      =>   64,  1, 'C', 0x80 ],
-      [ BS_Reserved1   =>   65,  1, 'C', 0 ],
-      [ BS_BootSig     =>   66,  1, 'C', 0x29 ],
-      [ BS_VolID       =>   67,  4, 'V' ],
-      [ BS_VolLab      =>   71, 11, 'A11', 'NO NAME' ],
-      [ BS_FilSysType  =>   82,  8, 'A8' ],
-      [ _signature     =>  510,  2, 'v', 0xAA55 ],
-   );
-   sub unpack {
-      my $class= shift;
-      my $buf_ref= ref $_[0] eq 'SCALAR'? $_[0] : \$_[0];
-      length($$buf_ref) >= 512 or croak "Pass at least the entire first sector to 'unpack'";
-      # According to the official spec, the only way to know whether you have FAT32 or FAT16
-      # is to calculate the count of clusters available in the data region, which this module
-      # implements in the constructor.  However, in order to unpack all of the fields of
-      # sector0, you have to know whether it is FAT16 or FAT32 because FAT32 moves some of the
-      # fields.  But you need those extended fields to calculate whether it is FAT32 or not...
-      # It's sort of a bullshit circular dependency when clearly you could use the
-      # BPB_RootEntCnt to know whether it was FAT32 or not, since FAT32 will *always* be 0 and
-      # the previous generations *can't* be 0.
-      # Anyway, instead of uniform single-pass field unpacking, we get this:
-      state %fields= qw(
-         bytes_per_sector      @11v
-         sectors_per_cluster   @13C
-         reserved_sector_count @14v
-         fat_count             @16C
-         root_dirent_count     @17v
-         fat_sector_count      @22v
-         fat_sector_count32    @36V
-         total_sector_count    @19v
-         total_sector_count32  @32V
-      );
-      state @fields= keys %fields;
-      state $packstr= join ' ', values %fields;
-
-      my %attrs;
-      @attrs{@fields}= unpack $packstr, $$buf_ref;
-      for (qw( fat_sector_count total_sector_count )) {
-         my $_32= delete $attrs{$_.'32'};
-         $attrs{$_} ||= $_32;
-      }
-      return $class->new(%attrs);
-   }
-
-   sub pack {
-      my $self= shift;
-      my $buf_ref= !@_? \(my $buf= '') : ref $_[0] eq 'SCALAR'? shift : \shift;
-      my %attrs= @_ == 1 && isa_hash $_[0]? %{$_[0]} : @_;
-      $attrs{BPB_BytsPerSec}= $self->bytes_per_sector;
-      $attrs{BPB_SecPerClus}= $self->sectors_per_cluster;
-      $attrs{BPB_RsvdSecCnt}= $self->reserved_sector_count;
-      $attrs{BPB_NumFATs}=    $self->fat_count;
-      $attrs{BPB_RootEntCnt}= $self->root_dirent_count;
-      $attrs{BS_VolID} //= time & 0xFFFFFFFF;
-      my $fields;
-      if ($self->bits == FAT32) {
-         $attrs{BPB_FATSz16}= 0;
-         $attrs{BPB_FATSz32}= $self->fat_sector_count;
-         $attrs{BPB_TotSec16}= 0;
-         $attrs{BPB_TotSec32}= $self->total_sector_count;
-         $attrs{BS_FilSysType}= "FAT";
-         $fields= \@sector0_fat32_fields;
-      } else {
-         $attrs{BPB_FATSz16}= $self->fat_sector_count < 0x10000? $self->fat_sector_count : 0;
-         $attrs{BPB_FATSz32}= $self->fat_sector_count < 0x10000? 0 : $self->fat_sector_count;
-         $attrs{BPB_TotSec16}= $self->total_sector_count < 0x10000? $self->total_sector_count : 0;
-         $attrs{BPB_TotSec32}= $self->total_sector_count < 0x10000? 0 : $self->total_sector_count;
-         $attrs{BS_FilSysType}= $self->bits == 12? 'FAT12' : 'FAT16';
-         $fields= \@sector0_fat16_fields;
-      }
-      $attrs{$_->[0]} //= $_->[4] // croak "No value supplied for $_->[0], and no default"
-         for @$fields;
-      my $packstr= join ' ', map '@'.$_->[1].$_->[3], @$fields;
-      substr($$buf_ref, 0, 512, pack($packstr, @attrs{map $_->[0], @$fields}));
-      return $buf_ref;
-   }
-}
-
 # Element 0 of the FAT is used for an inversion list of which sectors are allocated.
 # It's not as good as a tree, but should perform well when the typical use case is
 # to pack files end to end without fragmentation.
@@ -1013,7 +710,7 @@ package Sys::Export::VFAT::Allocator {
    }
    # Allocate $count clusters from anywhere and return an inversion list describing
    # the sectors allocated.
-   sub alloc($count) {
+   sub alloc($self, $count) {
       my $invlist= $self->{free};
       # If there is enough free sectors, this basically just chops some entries
       # off the free inversion list to become the allocated inversion list.
@@ -1061,13 +758,6 @@ package Sys::Export::VFAT::Allocator {
          return $self->_alloc_range($cluster_id, $cluster_lim, $i);
       }
    }
-   sub alloc_byte_range($self, $offset, $count, $geom) {
-      my $cl_id= $geom->get_cluster_of_offset($offset);
-      # _optimize_geometry is responsible for ensuring alignment
-      $geom->get_cluster_offset($cl_id) == $offset
-         or croak "BUG: FAT_offset not aligned to a cluster boundary";
-      $self->alloc_range($cl_id, ceil($count / $geom->bytes_per_cluster));
-   }
    # Allocate any contiguous span of clusters, optionally restricted to
    # being aligned to some power-of-two byte offset, according to a Geometry.
    sub alloc_contiguous($self, $count, $align=1, $align_ofs=0) {
@@ -1085,10 +775,7 @@ package Sys::Export::VFAT::Allocator {
          return $self->_alloc_range($start, $start+$count, $i);
       }
    }
-   sub alloc_byte_contiguous($self, $count, $align=512, $align_ofs=0, $geom) {
-      ...
-   }
-   sub _alloc_range($cl_start, $cl_lim, $invlist_idx) { 
+   sub _alloc_range($self, $cl_start, $cl_lim, $invlist_idx) { 
       # remove this range from the 'free' invlist
       my $from_edge= $self->{free}[$invlist_idx] == $cl_start;
       my $to_edge=  ($self->{free}[$invlist_idx+1]//0) == $cl_lim;
