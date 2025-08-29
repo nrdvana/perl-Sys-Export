@@ -181,30 +181,6 @@ Unfortunately you won't get that exception until L</finish> is called.
 
 =cut
 
-my sub _round_up_pow2($number) {
-   $number |= $number >> 1;
-   $number |= $number >> 2;
-   $number |= $number >> 4;
-   $number |= $number >> 8;
-   $number |= $number >> 16;
-   $number |= $number >> 32;
-   return $number+1;
-}
-my sub isa_pow2($number) { $number == _round_up_pow2($number-1) }
-my sub _round_up_to_alignment($number, $pow2) {
-   my $mask= $pow2-1;
-   return ($number + $mask) & ~$mask;
-}
-
-# The smallest conceivable address where the data region could start
-my $minimum_offset_to_data= Sys::Export::VFAT::Geometry->new(
-   bytes_per_sector => 512,
-   sectors_per_cluster => 1,
-   fat_count => 1,
-   root_dirent_count => 1,
-   cluster_count => 1
-   )->data_offset;
-
 sub add($self, $file) {
    # If user supplied FAT_utf16_name, use that as a more official source of Unicode
    my $uname= $file->{uname} // decode('UTF-8', $file->{name}, Encode::FB_CROAK);
@@ -260,6 +236,15 @@ sub add($self, $file) {
    $ent->{FAT_longname}= $leaf;
    # Sanity check FAT_offset before we get too far along
    if (defined $ent->{FAT_offset}) {
+      # The smallest conceivable address where the data region could start
+      state $minimum_offset_to_data= Sys::Export::VFAT::Geometry->new(
+            bytes_per_sector => 512,
+            sectors_per_cluster => 1,
+            fat_count => 1,
+            root_dirent_count => 1,
+            cluster_count => 1
+         )->data_start_offset;
+
       # must fall in the data area
       $ent->{FAT_offset} > $minimum_offset_to_data
       # must be a multiple of at least 512 (probably more)

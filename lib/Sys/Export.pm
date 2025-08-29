@@ -19,13 +19,14 @@ BEGIN {
 }
 our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
+   isa_pow2 round_up_to_pow2 round_up_to_multiple
    add skip find which finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
    S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
    S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
 );
 our %EXPORT_TAGS= (
    basic_methods => [qw( exporter add skip find which finish rewrite_path rewrite_user rewrite_group )],
-   isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_int )],
+   isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_int isa_pow2 )],
    stat_modes => [qw( S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT )],
    stat_tests => [qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT )],
 );
@@ -282,6 +283,10 @@ Is it an arrayref?
 
 Is it an integer?
 
+=item isa_pow2
+
+Is it a power of 2?
+
 =back
 
 =cut
@@ -294,6 +299,7 @@ sub isa_export_dst :prototype($) { blessed($_[0]) && $_[0]->can('add') && $_[0]-
 sub isa_userdb     :prototype($) { blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
 sub isa_user       :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
 sub isa_group      :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
+sub isa_pow2       :prototype($) { $_[0] == round_up_to_pow2($_[0]-1) }
 
 =head2 C<:stat_modes> bundle
 
@@ -384,5 +390,35 @@ sub expand_stat_shorthand {
    }
    return %attrs;
 }
+
+=head2 round_up_to_pow2
+
+  $pow2= round_up_to_pow2($number);
+
+Return a number rounded up to the next power of 2
+
+=head2 round_up_to_multiple
+
+  $aligned= round_up_to_multiple($n, $pow2);
+
+Return a number rounded up to the next multiple of a power of 2.
+
+=cut
+
+sub round_up_to_pow2($n) {
+   $n |= $n >> 1;
+   $n |= $n >> 2;
+   $n |= $n >> 4;
+   $n |= $n >> 8;
+   $n |= $n >> 16;
+   $n |= $n >> 32;
+   return $n+1;
+}
+
+sub round_up_to_multiple($n, $pow2) {
+   my $mask= $pow2-1;
+   return ($n + $mask) & ~$mask;
+}
+
 
 1;
