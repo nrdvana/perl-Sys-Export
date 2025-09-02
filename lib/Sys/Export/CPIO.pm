@@ -140,8 +140,9 @@ data to the stream, padding as necessary.
 =cut
 
 sub add($self, $fileinfo) {
-   my ($dev, $dev_major, $dev_minor, $ino, $mode, $nlink, $uid, $gid, $rdev, $rdev_major, $rdev_minor, $mtime, $name)
-      = @{$fileinfo}{qw( dev dev_major dev_minor ino mode nlink uid gid rdev rdev_major rdev_minor mtime name )};
+   my ($dev, $dev_major, $dev_minor, $ino, $mode, $nlink, $uid, $gid, $rdev, $rdev_major, $rdev_minor, $mtime)
+      = @{$fileinfo}{qw( dev dev_major dev_minor ino mode nlink uid gid rdev rdev_major rdev_minor mtime )};
+   my $name= _fileinfo_get_name_bytes($fileinfo);
    # best-effort to extract major/minor from dev and rdev, unless user specified them
    ($dev_major, $dev_minor)= Sys::Export::Unix::_dev_major_minor($dev)
       if defined $dev and !defined $dev_major || !defined $dev_minor;
@@ -150,6 +151,9 @@ sub add($self, $fileinfo) {
    defined $mode or croak "require 'mode'";
    defined $name or croak "require 'name'";
 
+   # Die on encoding mistakes
+   !utf8::is_utf8($fileinfo->{data}) or utf8::downgrade($fileinfo->{data}, 1)
+      or croak "->{data} must be 8-bit, but encountered wide character at $name";
    my $size= length($fileinfo->{data}) // 0;
    # Handle hard links
    if ($nlink && $nlink > 1 && ($mode & S_IFMT) != S_IFDIR) {
@@ -187,6 +191,18 @@ sub add($self, $fileinfo) {
    $self->{fh}->print("\0"x(4-($size & 3))) || die "write: $!"
       if $size & 3; # pad to multiple of 4
    $self;
+}
+
+sub _fileinfo_get_name_bytes($f) {
+   if (defined (my $name= $f->{name})) {
+      !utf8::is_utf8($name) or utf8::downgrade($name, 1)
+         or croak "->{name} must be encoded as bytes, but encountered wide character at $name";
+      return $name;
+   } elsif (defined $fileinfo->{uname}) {
+      return encode('UTF-8', $fileinfo->{uname}, Encode::FB_CROAK);
+   } else {
+      croak "Must specify either 'name' or 'uname'";
+   }
 }
 
 =method finish
