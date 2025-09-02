@@ -118,6 +118,19 @@ subtest geometry => sub {
    };
 };
 
+subtest device_addr_placement => sub {
+   my $tmp= File::Temp->new;
+   my $dst= Sys::Export::VFAT->new(filename => "$tmp");
+   my $token= "UniqueString".("0123456789"x50);
+   my $addr= 4096*256;
+   $dst->add([ file => "/TEST.DAT", $token, { device_addr => $addr }]);
+   $dst->finish;
+   
+   sysseek $tmp, $addr, 0 or die "seek: $!";
+   sysread $tmp, my $buf, length $token or die "read: $!";
+   is( $buf, $token, 'Found token at addr' );
+};
+
 subtest test_mounts => sub {
    skip_all 'Set TEST_MOUNTS=1 to enable tests that call "mount"'
       unless $ENV{TEST_MOUNTS};
