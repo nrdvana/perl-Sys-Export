@@ -13,9 +13,6 @@ use Encode;
 use Carp;
 our @CARP_NOT= qw( Sys::Export Sys::Export::Unix );
 use constant {
-   FAT12 => dualvar(12, "FAT12"),
-   FAT16 => dualvar(16, "FAT16"),
-   FAT32 => dualvar(32, "FAT32"),
    ATTR_READONLY  => dualvar(0x01, 'ATTR_READONLY'),
    ATTR_HIDDEN    => dualvar(0x02, 'ATTR_HIDDEN'),
    ATTR_SYSTEM    => dualvar(0x04, 'ATTR_SYSTEM'),
@@ -29,7 +26,7 @@ use Exporter 'import';
 our @EXPORT_OK= qw( FAT12 FAT16 FAT32 ATTR_READONLY ATTR_HIDDEN ATTR_SYSTEM ATTR_ARCHIVE
   is_valid_longname is_valid_shortname is_valid_volume_label );
 use Sys::Export qw( :isa expand_stat_shorthand );
-require Sys::Export::VFAT::Geometry;
+use Sys::Export::VFAT::Geometry qw( FAT12 FAT16 FAT32 );
 
 =head1 SYNOPSIS
 

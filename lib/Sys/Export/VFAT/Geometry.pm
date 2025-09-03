@@ -50,21 +50,28 @@ use v5.26;
 use warnings;
 use experimental qw( signatures );
 use Sys::Export qw( :isa round_up_to_pow2 round_up_to_multiple );
-use Sys::Export::VFAT qw( FAT12 FAT16 FAT32 );
+use Scalar::Util qw( dualvar );
 use POSIX 'ceil';
 use Carp;
-our @CARP_NOT= qw( Sys::Export );
+our @CARP_NOT= qw( Sys::Export::VFAT );
 use constant {
+   FAT12 => dualvar(12, "FAT12"),
+   FAT16 => dualvar(16, "FAT16"),
+   FAT32 => dualvar(32, "FAT32"),
    FAT12_MAX_CLUSTERS       => 4085-1,
-   FAT12_IDEAL_MAX_CLUSTERS => 4085-16,
+   FAT12_IDEAL_MAX_CLUSTERS => 4085-16,   # docs recommend 16 away from cutoff on either side
    FAT16_MIN_CLUSTERS       => 4085,
    FAT16_IDEAL_MIN_CLUSTERS => 4085+16,
    FAT16_MAX_CLUSTERS       => 65525-1,
    FAT16_IDEAL_MAX_CLUSTERS => 65525-16,
    FAT32_MIN_CLUSTERS       => 65525,
    FAT32_IDEAL_MIN_CLUSTERS => 65525+16,
-   FAT32_MAX_CLUSTERS       => (1<<28)-3,
+   FAT32_MAX_CLUSTERS       => 0xFFFFFF5, # can't allow 0xFFFFFF7 to be allocatable ID
 };
+use Exporter 'import';
+our @EXPORT_OK= qw( FAT12 FAT16 FAT32 FAT12_MAX_CLUSTERS FAT12_IDEAL_MAX_CLUSTERS
+   FAT16_MIN_CLUSTERS FAT16_IDEAL_MIN_CLUSTERS FAT16_MAX_CLUSTERS FAT16_IDEAL_MAX_CLUSTERS
+   FAT32_MIN_CLUSTERS FAT32_IDEAL_MIN_CLUSTERS FAT32_MAX_CLUSTERS );
 
 =constructor new
 
@@ -427,10 +434,12 @@ sub max_cluster_id        { $_[0]->cluster_count + 1 }
 sub root_dirent_count     { $_[0]{root_dirent_count} }
 sub root_sector_count     { ceil($_[0]->root_dirent_count / $_[0]->dirent_per_sector) }
 
+sub root_dir_start_sector($self) {
+   $self->reserved_sector_count + $self->fat_count * $self->fat_sector_count
+}
+sub root_dir_offset($self) { $self->root_dir_start_sector * $self->bytes_per_sector }
 sub data_start_sector($self) {
-   $self->{data_start_sector} //= $self->reserved_sector_count
-      + $self->fat_count * $self->fat_sector_count
-      + $self->root_sector_count;
+   $self->{data_start_sector} //= $self->root_dir_start_sector + $self->root_sector_count;
 }
 sub data_start_offset($self) { $self->data_start_sector * $self->bytes_per_sector }
 sub data_start_device_offset($self) { $self->data_start_offset + $self->device_offset }
@@ -657,7 +666,35 @@ sub pack {
       for @$fields;
    my $packstr= join ' ', map '@'.$_->[1].$_->[3], @$fields;
    substr($$buf_ref, 0, 512, pack($packstr, @attrs{map $_->[0], @$fields}));
-   # TODO: write fat32 extra structs, backup boot sector, boot loader, etc.
+   if ($self->bits == FAT32) {
+      # TODO: write fat32 extra structs, backup boot sector, boot loader, etc.
+      ...
+   }
+   
+   if (my $alloc= $attrs{allocation}) {
+      $alloc->max_cluster_id == $self->max_cluster_id
+         or croak "Max element of 'fat_entries' should be ".$self->max_cluster_id.", but was ".$alloc->max_cluster_id;
+      my $buf= $alloc->pack;
+      # store a copy of this into each of the regions occupied by fats
+      my $ofs= $self->reserved_sector_count * $self->bytes_per_sector;
+      for (my $i= 0; $i < $self->fat_count; $i++) {
+         substr($$buf_ref, $ofs, length($buf), $buf);
+         $ofs += $self->fat_sector_count * $self->bytes_per_sector;
+      }
+   }
+   
+   # For FAT12/16, write the (pre-encoded) root directory
+   if (length (my $root= $attrs{root_dir})) {
+      croak "Root directory must be a multiple of 32 bytes long"
+         if length($root) & 31;
+      croak "Root directory exceeds maximum number of entries"
+         if $self->root_dirent_count < (length($root) / 32);
+      substr($$buf_ref, $self->root_dir_offset, length($root), $root);
+      # If the encoding was shorter than the number of sectors, make sure it is followed
+      # by zeroes, which indicate empty dir entries.
+      my $remainder= $self->root_dirent_count*32 - length $root;
+      substr($$buf_ref, $self->root_dir_offset + length $root, $remainder, "\0"x$remainder);
+   }
    return $buf_ref;
 }
 
@@ -667,7 +704,7 @@ sub pack {
 
 This reads the geometry from a FAT boot sector.  The scalar must be at least the first 512 bytes
 of the filesystem.  You should leave most options un-set so that they derive from the boot
-sector values, but might choose to set:
+sector values, but you might choose to set:
 
 =over
 
