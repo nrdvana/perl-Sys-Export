@@ -865,155 +865,20 @@ sub _pack_dir($self, $dir) {
    # but that will happen automatically later as the data is appended to the file..
 }
 
-# Element 0 of the FAT is used for an inversion list of which sectors are allocated.
-# It's not as good as a tree, but should perform well when the typical use case is
-# to pack files end to end without fragmentation.
-package Sys::Export::VFAT::Allocator {
-   use v5.26;
-   use warnings;
-   use experimental qw( signatures );
-   use Scalar::Util 'refaddr';
-   use Carp;
-   
-   sub geometry     { @_ > 1? ($_[0]{geometry}= $_[1])    : $_[0]{geometry} }
-   sub max_cluster  { @_ > 1? ($_[0]{max_cluster}= $_[1]) : $_[0]{max_cluster} }
-   sub max_cluster_used { @{$_[0]{free}}? $_[0]{free}[0]-1 : $_[0]{max_cluster} }
-   sub fat          { $_[0]{fat} }
-   sub file_invlist { $_[0]{file_invlist} }
-
-   sub new($class, @attrs) {
-      my %attrs= @attrs == 1 && ref $attrs[0] eq 'HASH'? %{$attrs[0]} : @attrs;
-      my $geom= delete $attrs{geometry};
-      # max_cluster can be passed as undef, in which case it does not take the
-      # value from geometry.
-      my $max_cluster= exists $attrs{max_cluster}? delete $attrs{max_cluster}
-         : $geom? $geom->max_cluster_id
-         : undef;
-      carp "Unrecognized attributes ".join(', ', keys %attrs)
-         if keys %attrs;
-      my (@fat, @free);
-      @free= (2); # first usable cluster is always 2
-      # This object can be used open-ended for sizing up the table,
-      # or with an end-cluster for the packing the final copy
-      if ($max_cluster) {
-         push @free, $max_cluster+1;
-         $#fat= $max_cluster;
-      }
-      bless {
-         geometry => $geom,
-         max_cluster => $max_cluster,
-         free => \@free,
-         fat => \@fat
-      }, $class;
-   }
-   # Allocate $count clusters from anywhere and return an inversion list describing
-   # the sectors allocated.
-   sub alloc($self, $count) {
-      my $invlist= $self->{free};
-      # If there is enough free sectors, this basically just chops some entries
-      # off the free inversion list to become the allocated inversion list.
-      for (my $i= 0; $i < @$invlist; $i+= 2) {
-         my ($from, $upto)= @{$invlist}[$i,$i+1];
-         my $n= defined $upto? ($upto - $from) : undef; # free list may be open-ended
-         if (!defined $n || $n >= $count) {
-            # Filled the request, so now modify the free list
-            my @result;
-            if (defined $n && $n == $count) {
-               @result= splice(@$invlist, 0, $i+2);
-            } else {
-               @result= splice(@$invlist, 0, $i);
-               $result[$i]= $from;
-               $result[$i+1]= $from + $count;
-               $invlist->[0]= $from + $count;
-            }
-            # and build the cluster chain in the FAT
-            my $prev= 0;
-            for (my $j= 0; $j < @result; $j += 2) {
-               for ($result[$j] .. ($result[$j+1]-1)) {
-                  $self->{fat}[$prev]= $_ if $prev;
-                  $prev= $_;
-               }
-            }
-            $self->{fat}[$prev]= 0x0FFFFFF8;
-            return \@result;
-         }
-         $count -= $n;
-      }
-      return; # not enough available
-   }
-   # Allocate a specific range of clusters, return empty list if they aren't available
-   sub alloc_range($self, $cluster_id, $count) {
-      $count >= 0 or die "BUG: alloc_range count must be positive";
-      my $cluster_lim= $cluster_id + $count;
-      # Iterate the inversion list until the start $cluster_id, then ensure $count free
-      my $invlist= $self->{free};
-      for (my $i= 0; $i < @$invlist; $i += 2) {
-         my ($from, $upto)= @{$invlist}[$i, $i+1];
-         # Are we there yet?
-         next if defined $upto && $upto < $cluster_id;
-         # Range is occupied
-         last if $from > $cluster_id || (defined $upto && $upto < $cluster_lim);
-         return $self->_alloc_range($cluster_id, $cluster_lim, $i);
-      }
-   }
-   # Allocate any contiguous span of clusters, optionally restricted to
-   # being aligned to some power-of-two byte offset, according to a Geometry.
-   sub alloc_contiguous($self, $count, $align=1, $align_ofs=0) {
-      my $invlist= $self->{free};
-      for (my $i= 0; $i < @$invlist; $i+=2) {
-         my ($from, $upto)= @{$invlist}[$i, $i+1];
-         my $start= $from;
-         # Align start addr
-         if ($align > 1) {
-            my $remainder= ($start - $align_ofs) & ($align-1);
-            $start += $align - $remainder if $remainder;
-         }
-         # Is the range large enough?
-         next if defined $upto && $upto - $start < $count;
-         return $self->_alloc_range($start, $start+$count, $i);
-      }
-   }
-   sub _alloc_range($self, $cl_start, $cl_lim, $invlist_idx) { 
-      # remove this range from the 'free' invlist
-      my $from_edge= $self->{free}[$invlist_idx] == $cl_start;
-      my $to_edge=  ($self->{free}[$invlist_idx+1]//0) == $cl_lim;
-      if ($from_edge && $to_edge) {
-         splice(@{$self->{free}}, $invlist_idx, 2);
-      } elsif ($from_edge) {
-         $self->{free}[$invlist_idx]= $cl_lim;
-      } elsif ($to_edge) {
-         $self->{free}[$invlist_idx+1]= $cl_start;
-      } else {
-         splice(@{$self->{free}}, $invlist_idx+1, 0, $cl_start, $cl_lim);
-      }
-      # Build the cluster chain in the FAT
-      $self->{fat}[$_]= $_+1
-         for $cl_start .. $cl_lim-2;
-      $self->{fat}[$cl_lim-1]= 0x0FFFFFF8;
-      # Return an allocation inversion list of one segment
-      return [$cl_start, $cl_lim];
-   }
-   sub alloc_file($self, $file) {
-      my $g= $self->geometry // croak "geometry required for file allocation";
-      my $sz= $file->{size} or do { carp "Attempt to allocate zero-length file"; return };
-      my $cl_count= POSIX::ceil($sz / $g->bytes_per_cluster);
-      my $inv;
-      if ($file->{device_offset}) {
-         my ($cl, $n)= $g->get_cluster_extent_of_device_extent($file->{device_offset}, $sz);
-         $inv= $self->alloc_range($cl, $cl_count)
-            or croak "Can't allocate $cl_count clusters from offset $file->{device_offset}";
-      } elsif ($file->{device_align}) {
-         my ($mul, $ofs)= $g->get_cluster_alignment_of_device_alignment($file->{device_align});
-         $inv= $self->alloc_contiguous($cl_count, $mul, $ofs)
-            or croak "Can't allocate $cl_count clusters aligned to $file->{device_align}";
-      } else {
-         $inv= $self->alloc($cl_count)
-            or croak "Can't allocate $cl_count clusters";
-      }
-      # Multiple file entries may refer to the same allocation, so the FAT_cluster arrayref
-      # is used as a shared reference to where the fle got stored.  Don't write to it yet,
-      # because this may be a trial-run for allocation.
-      $self->{file_invlist}{refaddr $file->{FAT_cluster}}= $inv;
+sub _alloc_file($self, $geom, $alloc, $file) {
+   my $sz= $file->{size} or do { carp "Attempt to allocate zero-length file"; return };
+   my $cl_count= POSIX::ceil($sz / $geom->bytes_per_cluster);
+   if ($file->{device_offset}) {
+      my ($cl, $n)= $geom->get_cluster_extent_of_device_extent($file->{device_offset}, $sz);
+      return $alloc->alloc_range($cl, $cl_count)
+         // croak "Can't allocate $cl_count clusters from offset $file->{device_offset}";
+   } elsif ($file->{device_align}) {
+      my ($mul, $ofs)= $geom->get_cluster_alignment_of_device_alignment($file->{device_align});
+      return $alloc->alloc_contiguous($cl_count, $mul, $ofs)
+         // croak "Can't allocate $cl_count clusters aligned to $file->{device_align}";
+   } else {
+      return $alloc->alloc($cl_count)
+         // croak "Can't allocate $cl_count clusters";
    }
 }
 
