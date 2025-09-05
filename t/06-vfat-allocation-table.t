@@ -33,7 +33,7 @@ is( [uc(unpack('H*', $alloc->pack)) =~ /(..)/g], [qw(
    15 60 01 17 80 01 19 A0 01 1B C0 01 1D F0 FF
    1F 00 02 21 20 02 23 40 02 25 60 02 27 F0 FF
    FF 0F
-)], 'packed fat16 table' );
+)], 'packed fat12 table' );
 
 done_testing;
 

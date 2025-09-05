@@ -398,32 +398,6 @@ sub add($self, $file) {
    $self;
 }
 
-# Record the file's cluster, and call any callbacks that were waiting on this
-sub _resolve_cluster($self, $file, $cl_id) {
-   my $cluster_ref= $file->{FAT_cluster};
-   $cluster_ref->[0]= $cl_id;
-   $_->($self, $cl_id, $file) for @{$cluster_ref}[1..$#$cluster_ref];
-}
-
-# Given an inversion list describing the allocated clusters for this file,
-# write the relevant chunks of the file to those cluster data areas.
-sub _write_clusters {
-   my ($fh, $geom, $alloc_invlist)= (shift, shift, shift);
-   my $data_ofs= 0;
-   for (my $i= 0; $i < @$alloc_invlist; $i += 2) {
-      my ($cl_start, $cl_lim)= @{$alloc_invlist}[$i, $i+1];
-      sysseek($fh, $geom->get_cluster_offset($cl_start), 0)
-         or croak "sysseek: $!";
-      my $size= ($cl_lim-$cl_start) * $geom->bytes_per_cluster;
-      $size= length($_[0]) - $data_ofs
-         if length($_[0]) - $data_ofs < $size;
-      my $wrote= syswrite($fh, $_[0], $size, $data_ofs);
-      croak "syswrite: $!" if !defined $wrote;
-      croak "Unexpected short write" if $wrote != $size;
-      $data_ofs += $wrote;
-   }
-}
-
 =method finish
 
 This method performs all the actual work of building the filesystem.  This module writes the
@@ -447,39 +421,85 @@ sub finish($self) {
    # size vs. the size of the FAT it generates
    my ($geom, $alloc)= $self->_optimize_geometry(\@dirs, \@files)
       or croak "No geometry options can meet your device_offset / device_align requests";
-   my $cluster_size= $geom->bytes_per_cluster;
+   $self->{geometry}= $geom;
+   $self->{allocation_table}= $alloc;
+
    my $fh= File::Temp->new;
    truncate($fh, $geom->total_size)
       or croak "truncate: $!";
-   # The files and dirs have all been assigned clusters, so begin writing them there
-   # and repacking the directories now that cluster ids are known for dirents.
+   $self->_write_filesystem($fh);
+   $fh->close or croak "close: $!";
+   1;
+}
+
+# This function depends on the file being pre-zeroed, which happens automatially for an empty
+# file that has just had its length changed by truncate().  This would write an invalid
+# filesystem if the handle is a block device with random leftover data in it.
+sub _write_filesystem($self, $fh) {
+   my $geom= $self->{geometry};
+   my $alloc= $self->{allocation_table};
+   $alloc->max_cluster_id == $geom->max_cluster_id
+      or croak "Max element of 'fat_entries' should be ".$geom->max_cluster_id.", but was ".$alloc->max_cluster_id;
+   # Pack the boot sector and other reserved sectors
+   my $buf= $self->_pack_reserved_sectors();
+   my $wrote= syswrite($fh, $buf);
+   croak "syswrite: $!" if !defined $wrote;
+   croak "Unexpected short write" if $wrote != length $buf;
+   # Pack the allocation tables
+   $buf= $alloc->pack;
+   # store a copy of this into each of the regions occupied by fats
+   my $ofs= $geom->reserved_sector_count * $geom->bytes_per_sector;
+   for (my $i= 0; $i < $geom->fat_count; $i++) {
+      sysseek($fh, $ofs, 0) or croak "sysseek: $!";
+      $wrote= syswrite($fh, $buf);
+      croak "syswrite: $!" if !defined $wrote;
+      croak "Unexpected short write" if $wrote != length $buf;
+      $ofs += $geom->fat_sector_count * $geom->bytes_per_sector;
+   }
+   # For FAT12/FAT16, write the root directory entries
+   if ($geom->bits < FAT32) {
+      my $root= $self->{_root};
+      die "BUG: mis-sized FAT16 root directory"
+         if !$root->{size} || ($root->{size} & 31) || length $root->{data} != $root->{size}
+            || $root->{size} > $geom->root_sector_count * $geom->bytes_per_sector;
+      sysseek($fh, $geom->root_dir_offset, 0) or croak "sysseek: $!";
+      $wrote= syswrite($fh, $root->{data});
+      croak "syswrite: $!" if !defined $wrote;
+      croak "Unexpected short write" if $wrote != length $buf;
+   }
+   # The files and dirs have all been assigned clusters by _optimize_geometry
    for my $f (@files, @dirs) {
       next unless $f->{size};
-      my $invlist= $alloc->invlist_for_file($f);
-      _resolve_cluster($f, $invlist->[0]);
-      _write_clusters($f, $geom, $invlist, $f->{data});
+      my $cl= $f->{FAT_cluster}[0] or die "BUG: no cluster assigned";
+      my $chain= $alloc->get_chain($cl) or die "BUG: no chain at $cl";
+      _write_clusters($f, $geom, $chain->{invlist}, $f->{data});
    }
-   
-   # Encode the boot sector
-   ...;
-   # If fat32, encode the extra structs
-   ...;
-   # Blank the rest of the reserved sectors, if any requested
-   ...;
-   # If fat12/16, encode the root dir
-   ...;
-   # Pack the FAT then store each copy
-   my $fat;
-   if ($geom->bits == FAT12) {
-      ...
-   } else {
-      $fat= pack(($geom->bits == FAT16? 'v*':'V*'), @$fat);
+}
+
+# Record the file's cluster, and call any callbacks that were waiting on this
+sub _resolve_cluster($self, $f, $cl_id) {
+   my $cluster_ref= ref $f eq 'HASH'? $f->{FAT_cluster} : $f;
+   $cluster_ref->[0]= $cl_id;
+   $_->($self, $cl_id, $file) for @{$cluster_ref}[1..$#$cluster_ref];
+}
+
+# Given an inversion list describing the allocated clusters for this file,
+# write the relevant chunks of the file to those cluster data areas.
+sub _write_clusters {
+   my ($fh, $geom, $alloc_invlist)= (shift, shift, shift);
+   my $data_ofs= 0;
+   for (my $i= 0; $i < @$alloc_invlist; $i += 2) {
+      my ($cl_start, $cl_lim)= @{$alloc_invlist}[$i, $i+1];
+      sysseek($fh, $geom->get_cluster_offset($cl_start), 0)
+         or croak "sysseek: $!";
+      my $size= ($cl_lim-$cl_start) * $geom->bytes_per_cluster;
+      $size= length($_[0]) - $data_ofs
+         if length($_[0]) - $data_ofs < $size;
+      my $wrote= syswrite($fh, $_[0], $size, $data_ofs);
+      croak "syswrite: $!" if !defined $wrote;
+      croak "Unexpected short write" if $wrote != $size;
+      $data_ofs += $wrote;
    }
-   for my $i (0..($geom->fat_count-1)) {
-      sysseek($fh, $geom->get_fat_offset($i, 0), 0);
-      syswrite($fh, $fat);
-   }
-   ...
 }
 
 =export is_valid_longname
@@ -696,7 +716,6 @@ sub _optimize_geometry($self, $files, $dirs) {
             cluster_count          => $clusters,
             used_root_dirent_count => $root_dirent_used,
          );
-         my $alloc= Sys::Export::VFAT::Allocator->new(geometry => $trial_geom, max_cluster => undef);
          if (@offset_files || @aligned_files) {
             # tables are too large? Try again with larger clusters.
             if (defined $min_ofs && $min_ofs < $trial_geom->data_start_device_offset) {
@@ -712,9 +731,15 @@ sub _optimize_geometry($self, $files, $dirs) {
             }
          }
          # Now verify we have enough clusters by actually alocating them
+         my $alloc= Sys::Export::VFAT::Allocator->new;
+         my %file_cluster;
          unless (eval {
-            $alloc->alloc_file($_)
-               for @offset_files, @aligned_files, @other_files, @$dirs;
+            for my $f (@offset_files, @aligned_files, @other_files, @$dirs,
+               ($geom->bits == FAT32? ($self->{_root}) : ())
+            ) {
+               my $cluster_ref= $f->{FAT_cluster};
+               $file_cluster{refaddr $cluster_ref} //= [ $self->_alloc_file($geom, $alloc, $f), $cluster_ref ];
+            }
             1
          }) {
             $fail_reason{$sectors_per_cluster}= "$@";
@@ -726,11 +751,15 @@ sub _optimize_geometry($self, $files, $dirs) {
          }
          # Is this the smallest option so far?
          if (!$best || $best->{geom}->total_sector_count > $trial_geom->total_sector_count) {
-            $best= { geom => $trial_geom, alloc => $alloc };
+            $best= { geom => $trial_geom, alloc => $alloc, file_cluster => \%file_cluster };
          }
       }
    }
-   return $best? @{$best}{'geom','alloc'} : ();
+   return unless $best;
+   # Apply file cluster IDs to the file->{FAT_cluster} attributes
+   $self->_resolve_cluster($_->[1], $_->[0])
+      for values %{ $best->{file_cluster} };
+   return @{$best}{'geom','alloc'};
 }
 
 # This returns a valid 8.3 filename which doesn't conflict with any of the keys in %$existing
@@ -880,6 +909,109 @@ sub _alloc_file($self, $geom, $alloc, $file) {
       return $alloc->alloc($cl_count)
          // croak "Can't allocate $cl_count clusters";
    }
+}
+
+our @sector0_fields_common= (
+   [ BS_jmpBoot     =>    0,  3, 'a3', '' ],
+   [ BS_OEMName     =>    3,  8, 'a8', 'MSWIN4.1' ],
+   [ BPB_BytsPerSec =>   11,  2, 'v' ],
+   [ BPB_SecPerClus =>   13,  1, 'C' ],
+   [ BPB_RsvdSecCnt =>   14,  2, 'v' ],
+   [ BPB_NumFATs    =>   16,  1, 'C' ],
+   [ BPB_RootEntCnt =>   17,  2, 'v' ],
+   [ BPB_TotSec16   =>   19,  2, 'v' ],
+   [ BPB_Media      =>   21,  1, 'C', 0xF8 ],
+   [ BPB_FATSz16    =>   22,  2, 'v' ],
+   [ BPB_SecPerTrk  =>   24,  2, 'v', 0 ],
+   [ BPB_NumHeads   =>   26,  2, 'v', 0 ],
+   [ BPB_HiddSec    =>   28,  4, 'V', 0 ],
+   [ BPB_TotSec32   =>   32,  4, 'V'  ]
+);
+our @sector0_fat16_fields= (
+   @sector0_fields_common,
+   [ BS_DrvNum      =>   36,  1, 'C', 0x80 ],
+   [ BS_Reserved1   =>   37,  1, 'C', 0 ],
+   [ BS_BootSig     =>   38,  1, 'C', 0x29 ],
+   [ BS_VolID       =>   39,  4, 'V' ],
+   [ BS_VolLab      =>   43, 11, 'A11', 'NO NAME' ],
+   [ BS_FilSysType  =>   54,  8, 'A8' ],
+   [ _signature     =>  510,  2, 'v', 0xAA55 ],
+);
+our @sector0_fat32_fields= (
+   @sector0_fields_common,
+   [ BPB_FATSz32    =>   36,  4, 'V' ],
+   [ BPB_ExtFlags   =>   40,  2, 'v', 0 ],
+   [ BPB_FSVer      =>   42,  2, 'v', 0 ],
+   [ BPB_RootClus   =>   44,  4, 'V' ],
+   [ BPB_FSInfo     =>   48,  2, 'v' ],
+   [ BPB_BkBootSec  =>   50,  2, 'v', 0 ],
+   [ BPB_Reserved   =>   52, 12, 'a12', '' ],
+   [ BS_DrvNum      =>   64,  1, 'C', 0x80 ],
+   [ BS_Reserved1   =>   65,  1, 'C', 0 ],
+   [ BS_BootSig     =>   66,  1, 'C', 0x29 ],
+   [ BS_VolID       =>   67,  4, 'V' ],
+   [ BS_VolLab      =>   71, 11, 'A11', 'NO NAME' ],
+   [ BS_FilSysType  =>   82,  8, 'A8' ],
+   [ _signature     =>  510,  2, 'v', 0xAA55 ],
+);
+our @fat32_fsinfo_fields= (
+   [ FSI_LeadSig    =>    0,  4, 'V', 0x41615252 ],
+   [ FSI_Reserved1  =>    4,480, 'a480', '' ],
+   [ FSI_StrucSig   =>  484,  4, 'V', 0x61417272 ],
+   [ FSI_Free_Count =>  488,  4, 'V', 0xFFFFFFFF ],
+   [ FSI_Nxt_Free   =>  492,  4, 'V', 0xFFFFFFFF ],
+   [ FSI_Reserved2  =>  496, 12, 'a12', '' ],
+   [ FSI_TrailSig   =>  508,  4, 'V', 0xAA550000 ],
+);
+sub _append_pack_args($pack, $vals, $ofs, $fields, $attrs) {
+   for (0..$#$fields) {
+      push @$pack, '@'.($ofs+$_->[1]).$_->[3];
+      push @$vals, $attrs->{$_->[0]} // $_->[4]
+         // croak "No value supplied for $_->[0], and no default";
+   }
+}
+
+sub _pack_reserved_sectors($self, %attrs) {
+   my (@pack, @vals);
+   my $geom= $self->geometry;
+   $attrs{BPB_BytsPerSec}= $geom->bytes_per_sector;
+   $attrs{BPB_SecPerClus}= $geom->sectors_per_cluster;
+   $attrs{BPB_RsvdSecCnt}= $geom->reserved_sector_count;
+   $attrs{BPB_NumFATs}=    $geom->fat_count;
+   $attrs{BPB_RootEntCnt}= $geom->root_dirent_count;
+   $attrs{BS_VolLab} //= $self->volume_label;
+   $attrs{BS_VolID} //= time & 0xFFFFFFFF;
+   if ($geom->bits < FAT32) {
+      $attrs{BPB_FATSz16}= $geom->fat_sector_count < 0x10000? $geom->fat_sector_count : 0;
+      $attrs{BPB_FATSz32}= $geom->fat_sector_count < 0x10000? 0 : $geom->fat_sector_count;
+      $attrs{BPB_TotSec16}= $geom->total_sector_count < 0x10000? $geom->total_sector_count : 0;
+      $attrs{BPB_TotSec32}= $geom->total_sector_count < 0x10000? 0 : $geom->total_sector_count;
+      $attrs{BS_FilSysType}= $geom->bits == 12? 'FAT12' : 'FAT16';
+      _append_pack_args(\@pack, \@vals, 0, \@sector0_fat16_fields, \%attrs);
+   } else {
+      # Did the user specify location of fsinfo?  If not, default to sector 1
+      $attrs{BPB_FSInfo} //= 1;
+      $attrs{BPB_FATSz16}= 0;
+      $attrs{BPB_FATSz32}= $geom->fat_sector_count;
+      $attrs{BPB_TotSec16}= 0;
+      $attrs{BPB_TotSec32}= $geom->total_sector_count;
+      $attrs{BS_FilSysType}= "FAT";
+      _append_pack_args(\@pack, \@vals, 0, \@sector0_fat32_fields, \%attrs);
+      
+      # FSInfo struct, location is configurable
+      my $fsi_ofs= $attrs{BPB_FSInfo} * $attrs{BPB_BytsPerSec};
+      $attrs{FSI_Free_count} //= $self->allocation_table->free_cluster_count;
+      $attrs{FSI_Nxt_Free}   //= $self->allocation_table->first_free_cluster;
+      _append_pack_args(\@pack, \@vals, $fsi_ofs, \@fat32_fsinfo_fields, \%attrs);
+
+      # Backup copy of boot sector, not required.
+      if ($attrs{BPB_BkBootSec}) {
+         my $bk_ofs= $attrs{BPB_BkBootSec} * $attrs{BPB_BytsPerSec};
+         _append_pack_args(\@pack, \@vals, $bk_ofs, \@sector0_fat32_fields, \%attrs);
+         _append_pack_args(\@pack, \@vals, $bk_ofs+$fsi_ofs, \@fat32_fsinfo_fields, \%attrs);
+      }
+   }
+   pack join(' ', @pack), @vals;
 }
 
 1;

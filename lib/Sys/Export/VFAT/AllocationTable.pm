@@ -66,7 +66,10 @@ sub max_used_cluster_id($self) {
    my $free= $self->free;
    # if free list is odd length, it means open-ended free space, so return cluster before that.
    # otherwise, the free list was specified according to max_cluster_id
-   @$free & 1? $free->[-1]-1 : $self->max_cluster_id
+   # if even length and ends at max_cluster_id, max used is start of that range - 1
+   @$free & 1? $free->[-1]-1
+   : @$free && $free->[-1] == $self->max_cluster_id+1? $free->[-2]-1
+   : $self->max_cluster_id
       // die "BUG: 'free' invlist cannot be empty if max_cluster_id is not set"
 }
    
@@ -131,7 +134,7 @@ sub alloc($self, $count) {
    croak "Cluster count must be an unsigned integer"
       unless isa_int $count && $count > 0;
    my $invlist= $self->{free};
-   # If there is enough free sectors, this basically just chops some entries
+   # If there are enough free sectors, this basically just chops some entries
    # off the free inversion list to become the allocated inversion list.
    for (my $i= 0; $i < @$invlist; $i+= 2) {
       my ($from, $upto)= @{$invlist}[$i,$i+1];

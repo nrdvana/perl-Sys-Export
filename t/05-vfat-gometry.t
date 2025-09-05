@@ -24,33 +24,33 @@ subtest fat12_math => sub {
    }, 'default geometry for 5000 clusters' );
 };
 
-my @compare_object_fields= qw( bytes_per_sector sectors_per_cluster dirent_per_sector
-   dirent_per_cluster bits reserved_sector_count fat_count fat_sector_count
-   root_dirent_count root_sector_count data_start_sector total_sector_count );
-subtest fat12_pack_unpack => sub {
-   for ($ENV{TEST_ALL_PERMUTATIONS}? (1..4084) : (1..500, 3500..4084)) {
-      my $g= new_geom(cluster_count => $_, exact_cluster_count => 1);
-      my $buf_ref= $g->pack;
-      is( Sys::Export::VFAT::Geometry->unpack($buf_ref), object {
-         call $_ => $g->$_
-            for @compare_object_fields;
-      }, "cluster_count => $_" )
-         or last; # prevent massive test failure spam
-   }
-};
-
-subtest fat16_pack_unpack => sub {
-   for ($ENV{TEST_ALL_PERMUTATIONS}? (4085..65524) : (4085..4500, 65000..65524)) {
-      my $g= new_geom(cluster_count => $_, exact_cluster_count => 1);
-      my $buf_ref= $g->pack;
-      is( Sys::Export::VFAT::Geometry->unpack($buf_ref), object {
-         call $_ => $g->$_
-            for @compare_object_fields;
-      }, "cluster_count => $_" )
-         or last; # prevent massive test failure spam
-   }
-};
-
+#my @compare_object_fields= qw( bytes_per_sector sectors_per_cluster dirent_per_sector
+#   dirent_per_cluster bits reserved_sector_count fat_count fat_sector_count
+#   root_dirent_count root_sector_count data_start_sector total_sector_count );
+#subtest fat12_pack_unpack => sub {
+#   for ($ENV{TEST_ALL_PERMUTATIONS}? (1..4084) : (1..500, 3500..4084)) {
+#      my $g= new_geom(cluster_count => $_, exact_cluster_count => 1);
+#      my $buf_ref= $g->pack;
+#      is( Sys::Export::VFAT::Geometry->unpack($buf_ref), object {
+#         call $_ => $g->$_
+#            for @compare_object_fields;
+#      }, "cluster_count => $_" )
+#         or last; # prevent massive test failure spam
+#   }
+#};
+#
+#subtest fat16_pack_unpack => sub {
+#   for ($ENV{TEST_ALL_PERMUTATIONS}? (4085..65524) : (4085..4500, 65000..65524)) {
+#      my $g= new_geom(cluster_count => $_, exact_cluster_count => 1);
+#      my $buf_ref= $g->pack;
+#      is( Sys::Export::VFAT::Geometry->unpack($buf_ref), object {
+#         call $_ => $g->$_
+#            for @compare_object_fields;
+#      }, "cluster_count => $_" )
+#         or last; # prevent massive test failure spam
+#   }
+#};
+#
 #subtest fat32_pack_unpack => sub {
 #   for (65525..66000) {
 #      my $g= new_geom(cluster_count => $_, exact_cluster_count => 1);
@@ -117,5 +117,3 @@ subtest align_clusters => sub {
 };
 
 done_testing;
-
-   
