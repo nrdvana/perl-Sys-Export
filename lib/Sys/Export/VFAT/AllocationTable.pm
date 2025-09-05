@@ -35,12 +35,6 @@ use Sys::Export::VFAT::Geometry qw( FAT12_MAX_CLUSTERS FAT16_MAX_CLUSTERS FAT32_
 
 Direct access to the allocation table array.  Don't modify it directly.
 
-=attribute free
-
-An inversion list describing free clusters.  Don't modify it directly.
-The list is open-ended if max_cluster is set to C<undef>, which is useful for finding out how
-many clusters you need.
-
 =attribute chains
 
 Hash keyed by starting-cluster ID which holds metadata about what is stored there.
@@ -59,20 +53,59 @@ The maximum cluster number which was allocated so far.
 =cut
 
 sub fat            { $_[0]{fat} }
-sub free           { $_[0]{free} }
+sub _invlist       { $_[0]{_invlist} }
 sub chains         { $_[0]{chains} }
-sub max_cluster_id { @_ > 1? ($_[0]{max_cluster_id}= $_[1]) : $_[0]{max_cluster_id} }
-sub max_used_cluster_id($self) {
-   my $free= $self->free;
-   # if free list is odd length, it means open-ended free space, so return cluster before that.
-   # otherwise, the free list was specified according to max_cluster_id
-   # if even length and ends at max_cluster_id, max used is start of that range - 1
-   @$free & 1? $free->[-1]-1
-   : @$free && $free->[-1] == $self->max_cluster_id+1? $free->[-2]-1
-   : $self->max_cluster_id
-      // die "BUG: 'free' invlist cannot be empty if max_cluster_id is not set"
+sub max_cluster_id { @_ > 1? $_[0]->set_max_cluster_id($_[1]) : $_[0]{max_cluster_id} }
+sub max_used_cluster_id { $_[0]{_invlist}[-1] - 1 }
+
+=attribute first_free_cluster
+
+When dynamically growing the table (undef max_cluster_id) this is always defined as the next
+unallocated cluster number.  When there is a defined max_cluster_id, this becomes undef after
+all clusters have been allocated.
+
+=cut
+
+sub first_free_cluster {
+   my ($first_free, $max)= ($_[0]{_invlist}[1], $_[0]{max_cluster_id});
+   defined $max && $first_free > $max? undef : $first_free;
 }
-   
+
+=method set_max_cluster_id
+
+This can change the allocation between dynamically-growing (C<undef>) and fixed-length.
+The number must be 2 or greater, and cannot be less than max_used_cluster_id.
+
+=cut
+
+sub set_max_cluster_id($self, $val) {
+   if (defined $val) {
+      my $min= $self->max_used_cluster_id;
+      croak "Cannot set max_cluster_id less than max_used_cluster_id"
+         if defined $min && $val < $min;
+      croak "Cannot set max_cluster_id less than 2"
+         if $val < 2;
+   }
+   $self->{max_cluster_id}= $val;
+}
+
+=attribute free_cluster_count
+
+When dynamically growing the table (undef max_cluster_id) this only reports free "holes" in
+the allocations so far, and 0 otherwise.  When max_cluster_id is defined, this gives the actual
+number of unallocated clusters.
+
+=cut
+
+sub free_cluster_count($self) {
+   my ($sum, $inv, $max)= (0, $self->{_invlist}, $self->{max_cluster_id});
+   for (my $i= 1; $i < $#$inv; $i += 2) {
+      $sum += $inv->[$i+1] - $inv->[$i];
+   }
+   $sum += $max - ($inv->[-1]-1) if defined $max;
+   return $sum;
+}
+
 =method get_chain
 
   $metadata= $self->get_chain($cluster_id);
@@ -102,19 +135,10 @@ sub new($class, @attrs) {
    carp "Unrecognized attributes ".join(', ', keys %attrs)
       if keys %attrs;
 
-   my (@fat, @free);
-   @free= (2); # first usable cluster is always 2
-   # This object can be used open-ended for sizing up the table,
-   # or with an end-cluster for the packing the final copy
-   if ($max_cluster_id) {
-      push @free, $max_cluster_id+1;
-      $#fat= $max_cluster_id;
-   }
-
    bless {
       max_cluster_id => $max_cluster_id,
-      fat => \@fat,
-      free => \@free,
+      fat => [],
+      _invlist => [ 0, 2 ], # mark 0-1 as allocated, to remove empty-list edge cases
       chains => {},
    }, $class;
 }
@@ -133,22 +157,24 @@ sub alloc($self, $count) {
    return 0 unless $count;
    croak "Cluster count must be an unsigned integer"
       unless isa_int $count && $count > 0;
-   my $invlist= $self->{free};
-   # If there are enough free sectors, this basically just chops some entries
-   # off the free inversion list to become the allocated inversion list.
-   for (my $i= 0; $i < @$invlist; $i+= 2) {
-      my ($from, $upto)= @{$invlist}[$i,$i+1];
-      my $n= defined $upto? ($upto - $from) : undef; # free list may be open-ended
+   my $inv= $self->{_invlist};
+   my $lim= $self->{max_cluster_id}? $self->{max_cluster_id}+1 : undef;
+   # If there are enough free sectors, this basically just removes gaps in the inversion list.
+   for (my $i= 1; $i < @$inv; $i+= 2) {
+      my ($from, $upto)= @{$inv}[$i,$i+1];
+      my $n= defined $upto? ($upto - $from) : undef;
       if (!defined $n || $n >= $count) {
-         # Filled the request, so now modify the free list
          my @result;
-         if (defined $n && $n == $count) {
-            @result= splice(@$invlist, 0, $i+2);
-         } else {
-            @result= splice(@$invlist, 0, $i);
-            $result[$i]= $from;
-            $result[$i+1]= $from + $count;
-            $invlist->[0]= $from + $count;
+         if (!defined $n) { # allocate from final region up to max sector
+            last if defined $lim && $lim - $from < $count;
+            @result= (splice(@$inv, 1, $i, $from + $count), $from+$count);
+         }
+         elsif ($n == $count) { # result comes from exactly the gaps between other allocation
+            @result= splice(@$inv, 1, $i+1);
+         }
+         else { # result comes from partial gap
+            @result= (splice(@$inv, 1, $i-1), $from, $from+$count);
+            $inv->[1]= $from + $count;
          }
          # and build the cluster chain in the FAT
          my $prev= 0;
@@ -183,18 +209,7 @@ sub alloc_range($self, $cluster_id, $count) {
       unless isa_int $count && $count > 0;
    croak "Invalid cluster id '$cluster_id'"
       unless isa_int $cluster_id && $cluster_id >= 2;
-   my $cluster_lim= $cluster_id + $count;
-   # Iterate the inversion list until the start $cluster_id, then ensure $count free
-   my $invlist= $self->{free};
-   for (my $i= 0; $i < @$invlist; $i += 2) {
-      my ($from, $upto)= @{$invlist}[$i, $i+1];
-      # Are we there yet?
-      next if defined $upto && $upto < $cluster_id;
-      # Range is occupied
-      last if $from > $cluster_id || (defined $upto && $upto < $cluster_lim);
-      return $self->_alloc_range($cluster_id, $cluster_lim, $i);
-   }
-   return undef;
+   return $self->_alloc_range($cluster_id, $cluster_id + $count);
 }
 
 =method alloc_contiguous
@@ -212,9 +227,9 @@ sub alloc_contiguous($self, $count, $align=1, $align_ofs=0) {
    return 0 unless $count;
    croak "Cluster count must be an unsigned integer"
       unless isa_int $count && $count > 0;
-   my $invlist= $self->{free};
-   for (my $i= 0; $i < @$invlist; $i+=2) {
-      my ($from, $upto)= @{$invlist}[$i, $i+1];
+   my $inv= $self->{_invlist};
+   for (my $i= 1; $i < @$inv; $i+=2) {
+      my ($from, $upto)= @{$inv}[$i, $i+1];
       my $start= $from;
       # Align start addr
       if ($align > 1) {
@@ -228,19 +243,37 @@ sub alloc_contiguous($self, $count, $align=1, $align_ofs=0) {
    return undef;
 }
 
-sub _alloc_range($self, $cl_start, $cl_lim, $invlist_idx) { 
-   # remove this range from the 'free' invlist
-   my $from_edge= $self->{free}[$invlist_idx] == $cl_start;
-   my $to_edge=  ($self->{free}[$invlist_idx+1]//0) == $cl_lim;
-   if ($from_edge && $to_edge) {
-      splice(@{$self->{free}}, $invlist_idx, 2);
-   } elsif ($from_edge) {
-      $self->{free}[$invlist_idx]= $cl_lim;
-   } elsif ($to_edge) {
-      $self->{free}[$invlist_idx+1]= $cl_start;
-   } else {
-      splice(@{$self->{free}}, $invlist_idx+1, 0, $cl_start, $cl_lim);
+# add the range ($start, $lim) to an inversion list where idx is pointed at
+# the first range that wasn't entirely before $start
+sub _invlist_alloc($inv, $start, $lim, $idx=undef) {
+   unless (defined $idx) {
+      for ($idx= 0; $idx < $#$inv && $inv->[$idx+1] <= $start; $idx++) {}
+      # here, [idx] is less/eq start, and [idx+1] is not (or doesn't exist)
+      # If idx is even, it means start fell within an allocated range
+      return 0 unless $idx & 1;
    }
+   my $from_edge= $inv->[$idx] == $start;
+   # allocating at the end
+   if ($idx == $#$inv) {
+      # max_cluster_id was checked by caller
+      $from_edge? ($inv->[$idx]= $lim)
+      : push(@$inv, $start, $lim);
+   }
+   else {
+      # does 'lim' exceed the gap between allocations?
+      return 0 if $lim > $inv->[$idx+1];
+      my $to_edge= $lim == $inv->[$idx+1];
+      $from_edge && $to_edge? splice(@$inv, $idx, 2)
+      : $from_edge?           ($inv->[$idx]= $lim)
+      : $to_edge?             ($inv->[$idx+1]= $start)
+      : splice(@$inv, $idx+1, 0, $start, $lim);
+   }
+   return 1;
+}
+
+sub _alloc_range($self, $cl_start, $cl_lim, $invlist_idx=undef) {
+   return undef if $self->max_cluster_id && $cl_lim-1 > $self->max_cluster_id;
+   return undef unless _invlist_alloc($self->{_invlist}, $cl_start, $cl_lim, $invlist_idx);
    # Build the cluster chain in the FAT
    $self->{fat}[$_]= $_+1
       for $cl_start .. $cl_lim-2;
