@@ -121,7 +121,7 @@ following options to override those defaults:
 
 =over
 
-=item device_offset
+=item volume_offset
 
 If you know that this logical volume starts at a nonzero device address, specify this to get
 alignments from the start of the device rather than alignments from the start of the volume.
@@ -133,7 +133,7 @@ If the number is larger than the size of a cluster, it ensures that at least eve
 is aligned.  If the number is equal or smaller than the size of a cluster, it ensures that
 every cluster has that alignment.
 
-For instance, if you set this to 4096, and the C<device_offset> is C<512*3> (which would
+For instance, if you set this to 4096, and the C<volume_offset> is C<512*3> (which would
 normally be a poor choice for partition alignment), and the cluster size is also 4096, then
 every cluster will have a device address with 0 in the low 12 bits, while having a volume offset
 ending with C<512*5> in the low 12 bits.
@@ -177,17 +177,17 @@ sub new($class, @attrs) {
    my %attrs= @attrs == 1 && isa_hash $attrs[0]? %{$attrs[0]} : @attrs;
    my ($bytes_per_sector, $sectors_per_cluster,   $fat_count,     $reserved_sector_count,
        $fat_sector_count, $root_dirent_count,     $cluster_count, $total_sector_count,
-       $min_bits,         $device_offset,         $align_clusters
+       $min_bits,         $volume_offset,         $align_clusters
       ) = delete @attrs{qw(
         bytes_per_sector   sectors_per_cluster     fat_count       reserved_sector_count
         fat_sector_count   root_dirent_count       cluster_count   total_sector_count
-        min_bits           device_offset           align_clusters
+        min_bits           volume_offset           align_clusters
       )};
    !defined $align_clusters or isa_pow2($align_clusters)
       or croak "align_clusters must be a power of 2 (was $align_clusters)";
-   $device_offset //= 0;
-   isa_int($device_offset) && $device_offset >= 0
-      or croak "device_offset must be a non-negative integer";
+   $volume_offset //= 0;
+   isa_int($volume_offset) && $volume_offset >= 0
+      or croak "volume_offset must be a non-negative integer";
 
    $bytes_per_sector //= 512;
    isa_pow2($bytes_per_sector) && 512 <= $bytes_per_sector && $bytes_per_sector <= 4096
@@ -210,7 +210,7 @@ sub new($class, @attrs) {
       bytes_per_sector      => $bytes_per_sector,
       sectors_per_cluster   => $sectors_per_cluster,
       fat_count             => $fat_count,
-      device_offset         => $device_offset,
+      volume_offset         => $volume_offset,
    };
    
    # From here down, we are either determining cluster_count from other properties,
@@ -300,7 +300,7 @@ sub new($class, @attrs) {
    # If caller requested alignment of clusters, figure that out
    if (defined $align_clusters && $align_clusters > $bytes_per_sector) {
       # there's a method for this, but avoid caching things yet
-      my $data_addr= $device_offset + $bytes_per_sector * (
+      my $data_addr= $volume_offset + $bytes_per_sector * (
          $reserved_sector_count
          + ($fat_count*$fat_sector_count)
          + ceil($root_dirent_count / $self->dirent_per_sector)
@@ -330,7 +330,7 @@ sub new($class, @attrs) {
    $self;
 }
 
-=attribute device_offset
+=attribute volume_offset
 
 The device address at which this volume begins.  You must supply this to get meaningful values
 from the various C<*_device_*> methods.
@@ -357,7 +357,7 @@ Number of 32-byte directory entries in one cluster.
 
 =cut
 
-sub device_offset { $_[0]{device_offset} }
+sub volume_offset { $_[0]{volume_offset} }
 
 sub bytes_per_sector      { $_[0]{bytes_per_sector} }
 sub sectors_per_cluster   { $_[0]{sectors_per_cluster} }
@@ -446,8 +446,8 @@ sub data_limit_sector($self) {
 }
 sub data_start_offset($self) { $self->data_start_sector * $self->bytes_per_sector }
 sub data_limit_offset($self) { $self->data_limit_sector * $self->bytes_per_sector } 
-sub data_start_device_offset($self) { $self->data_start_offset + $self->device_offset }
-sub data_limit_device_offset($self) { $self->data_limit_offset + $self->device_offset }
+sub data_start_device_offset($self) { $self->volume_offset + $self->data_start_offset }
+sub data_limit_device_offset($self) { $self->volume_offset + $self->data_limit_offset }
 
 sub data_sector_count($self) {
    $self->total_sector_count - $self->data_start_sector;
@@ -473,7 +473,7 @@ Same as C<get_cluster_start_sector> but as bytes from start of volume.
 =method get_cluster_device_offset
 
 Same as C<get_cluster_start_sector> but as an absolute device address based on
-L</device_offset>.
+L</volume_offset>.
 
 =method get_cluster_of_sector
 
@@ -489,7 +489,7 @@ Same as C<get_cluster_of_sector> but from a volume byte offset.
 =method get_cluster_of_device_offset
 
 Same as C<get_cluster_of_sector> but from an absolute device address based on
-L</device_offset>.
+L</volume_offset>.
 
 =cut
 
@@ -502,7 +502,7 @@ sub get_cluster_offset($self, $cluster_id) {
    $self->get_cluster_start_sector($cluster_id) * $self->bytes_per_sector;
 }
 sub get_cluster_device_offset($self, $cluster_id) {
-   $self->get_cluster_start_sector($cluster_id) * $self->bytes_per_sector + $self->device_offset;
+   $self->volume_offset + $self->get_cluster_start_sector($cluster_id) * $self->bytes_per_sector;
 }
 
 sub get_cluster_of_sector($self, $sector_idx) {
@@ -515,7 +515,7 @@ sub get_cluster_of_offset($self, $offset) {
    $self->get_cluster_of_sector(int($offset / $self->bytes_per_sector));
 }
 sub get_cluster_of_device_offset($self, $addr) {
-   $self->get_cluster_of_offset($addr - $self->device_offset);
+   $self->get_cluster_of_offset($addr - $self->volume_offset);
 }
 
 =method get_cluster_extent_of_volume_extent
@@ -545,12 +545,12 @@ sub get_cluster_extent_of_volume_extent($self, $offset, $size) {
 =method get_cluster_extent_of_device_extent
 
 Like C<get_cluster_extent_of_volume_extent> but specifies the byte range in terms of the device,
-factoring in L</device_offset>.
+factoring in L</volume_offset>.
 
 =cut
 
 sub get_cluster_extent_of_device_extent($self, $addr, $size) {
-   $self->get_cluster_extent_of_volume_extent($addr - $self->device_offset, $size);
+   $self->get_cluster_extent_of_volume_extent($addr - $self->volume_offset, $size);
 }
 
 =method get_cluster_alignment_of_device_alignment
@@ -598,10 +598,10 @@ sector values, but you might choose to set:
 
 =over
 
-=item device_offset
+=item volume_offset
 
 If you know the device offset of the FAT volume, setting this lets you use the various
-<*_device_offset> attributes and methods.
+<*_device_offset> attributes and methods accurately.
 
 =back
 

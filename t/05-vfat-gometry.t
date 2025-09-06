@@ -65,12 +65,12 @@ subtest fat12_math => sub {
 
 # Test requesting that clusters start aligned to the volume
 subtest align_clusters => sub {
-   for my $device_offset (0, 512, 1024, 1536) {
+   for my $volume_offset (0, 512, 1024, 1536) {
       for my $sec_per_cl (1, 2, 4, 8, 16) {
          for my $cluster_count (1011, 6601, 70001) { # FAT12, FAT16, FAT32 selected for default unalignment
-            subtest "dev_ofs=$device_offset,sec_per_cl=$sec_per_cl,cl=$cluster_count" => sub {
+            subtest "dev_ofs=$volume_offset,sec_per_cl=$sec_per_cl,cl=$cluster_count" => sub {
                my %attr= (
-                  device_offset => $device_offset,
+                  volume_offset => $volume_offset,
                   bytes_per_sector => 512,
                   sectors_per_cluster => $sec_per_cl,
                   cluster_count => $cluster_count,

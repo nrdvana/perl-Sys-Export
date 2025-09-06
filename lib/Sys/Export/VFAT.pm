@@ -150,11 +150,12 @@ An instance of L<Sys::Export::VFAT::Geometry> that describes the size and locati
 structures.  This is generated during L</finish>, but if you have very rigid ideas about how
 the filesystem should be laid out, you can pass it to the constructor.
 
-=attribute device_offset
+=attribute volume_offset
 
-This value is part of the calculation for methods like L</get_file_device_extent> and alignment
-of files to device addresses.  If you are writing this filesystem into a partition, and know
-the partition offset, set this attribute to get correct device alignments.
+This value causes the entire volume to be written at an offset from the start of the file or
+device.  This value is part of the calculation for methods like L</get_file_device_extent> and
+alignment of files to device addresses.  If you are writing this filesystem within a partition
+of a larger device, set this attribute to get correct device alignments.
 
 If not set, it defaults to 0, so alignments will be performed relative to the start of the
 volume, and methods like L</get_file_device_extent> will return ofsets relative to the volume.
@@ -163,16 +164,16 @@ volume, and methods like L</get_file_device_extent> will return ofsets relative 
 
 sub geometry($self) { $self->{geometry} }
 
-sub device_offset($self, @val) {
+sub volume_offset($self, @val) {
    if ($self->{geometry}) {
       croak "Geometry already decided" if @val;
-      return $self->{geometry}->device_offset;
+      return $self->{geometry}->volume_offset;
    }
    if (@val) {
-      croak "device_offset must be a multiple of 512" if $val[0] & 511;
-      return $self->{device_offset}= $val[0];
+      croak "volume_offset must be a multiple of 512" if $val[0] & 511;
+      return $self->{volume_offset}= $val[0];
    }
-   $self->{device_offset} // 0
+   $self->{volume_offset} // 0
 }
 
 =attribute bytes_per_sector
@@ -309,6 +310,8 @@ location is decided.
 
 Like C<device_offset>, but if you just want to request the file be aligned to the device rather
 than needing it to exist at a specific offset.  This is a power of 2 in bytes, such as '2048'.
+This takes attribute L</volume_offset> into account, possibly providing alignment that
+is a multiple of a power-of-2 from the start of the device but not from the start of the volume.
 
 =back
 
@@ -396,7 +399,7 @@ sub add($self, $file) {
       }
       else {
          # must fall in the data area
-         $ent->{device_offset} > $minimum_offset_to_data + $self->device_offset
+         $ent->{device_offset} > $minimum_offset_to_data + $self->volume_offset
          # must be a multiple of at least 512 (probably more)
          && !($ent->{device_offset} & 511)
             or croak "Invalid device_offset '$ent->{device_offset}' for file '$uname'";
@@ -748,7 +751,7 @@ sub _optimize_geometry($self, $dirs, $files) {
                if $log->is_trace;
          }
          my $geom= Sys::Export::VFAT::Geometry->new(
-            device_offset          => $self->device_offset,
+            volume_offset          => $self->volume_offset,
             (align_clusters        => $align)x!!$align,
             bytes_per_sector       => $bytes_per_sector,
             sectors_per_cluster    => $sectors_per_cluster,
