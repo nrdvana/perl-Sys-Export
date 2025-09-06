@@ -22,6 +22,24 @@ subtest device_addr_placement => sub {
    is( $buf, $token, 'Found token at addr' );
 };
 
+subtest device_align_placement => sub {
+   for my $align (1<<9, 1<<10, 1<<11, 1<<12, 1<<13, 1<<14) {
+      my $tmp= File::Temp->new;
+      my $dst= Sys::Export::VFAT->new($tmp);
+      my $token= "UniqueString".("0123456789"x50);
+
+      $dst->add([ file => "/TEST.DAT", $token, { device_align => $align }]);
+      $dst->finish;
+
+      my $img= do { $tmp->seek(0,0); local $/; <$tmp> };
+      my $offset= index($img, $token);
+      note sprintf "image is 0x%X bytes, found token at 0x%X, align 0x%X", length($img), $offset, $align;
+
+      ok( $offset > 0, 'offset > 0' );
+      ok( ($offset & ($align-1)) == 0, "aligned to $align" );
+   }
+};
+
 subtest test_mounts => sub {
    skip_all 'Set TEST_MOUNTS=1 to enable tests that call "mount"'
       unless $ENV{TEST_MOUNTS};

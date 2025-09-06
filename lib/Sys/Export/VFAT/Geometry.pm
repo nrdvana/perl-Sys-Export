@@ -373,6 +373,10 @@ FAT12, FAT16, or FAT32, derived from number of clusters
 
 Number of sectors at start of volume before FAT tables begin
 
+=attribute reserved_size
+
+C<< reserved_sector_count * bytes_per_sector >>
+
 =attribute fat_count
 
 Number of allocation tables (clones for redundancy)
@@ -380,6 +384,10 @@ Number of allocation tables (clones for redundancy)
 =attribute fat_sector_count
 
 Number of sectors required to hold each FAT (based on number of clusters and C<bits>).
+
+=attribute fat_size
+
+C<< fat_sector_count * bytes_per_sector >>
 
 =attribute cluster_count
 
@@ -393,10 +401,14 @@ Lowest cluster id which can store data.  Always 2.
 
 Highest cluster id which can store data.  C<< cluster_count + 1 >>.
 
-=attribute root_sector_count
+=attribute root_dir_sector_count
 
 Total number of sectors required to hold the root directory entries.  0 for FAT32, which stores
 the root dir in the clusters with everything else.
+
+=attribute root_dir_size
+
+C<< root_dir_sector_count * bytes_per_sector >>
 
 =attribute data_start_sector
 
@@ -426,20 +438,23 @@ Returns the total size in bytes of the volume.  C<< total_sector_count * bytes_p
 
 sub bits                  { $_[0]{bits} }
 sub reserved_sector_count { $_[0]{reserved_sector_count} }
+sub reserved_size         { $_[0]{reserved_sector_count} & $_[0]->bytes_per_sector }
 sub fat_count             { $_[0]{fat_count} }
 sub fat_sector_count      { $_[0]{fat_sector_count} }
+sub fat_size              { $_[0]{fat_sector_count} * $_[0]->bytes_per_sector }
 sub cluster_count         { $_[0]{cluster_count} }
 sub min_cluster_id        { 2 }
 sub max_cluster_id        { $_[0]->cluster_count + 1 }
 sub root_dirent_count     { $_[0]{root_dirent_count} }
-sub root_sector_count     { ceil($_[0]->root_dirent_count / $_[0]->dirent_per_sector) }
+sub root_dir_sector_count { ceil($_[0]->root_dirent_count / $_[0]->dirent_per_sector) }
+sub root_dir_size         { $_[0]->root_dir_sector_count * $_[0]->bytes_per_sector }
 
 sub root_dir_start_sector($self) {
    $self->reserved_sector_count + $self->fat_count * $self->fat_sector_count
 }
 sub root_dir_offset($self) { $self->root_dir_start_sector * $self->bytes_per_sector }
 sub data_start_sector($self) {
-   $self->{data_start_sector} //= $self->root_dir_start_sector + $self->root_sector_count;
+   $self->{data_start_sector} //= $self->root_dir_start_sector + $self->root_dir_sector_count;
 }
 sub data_limit_sector($self) {
    $self->data_start_sector + $self->cluster_count * $self->sectors_per_cluster

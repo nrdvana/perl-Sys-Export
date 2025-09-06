@@ -19,14 +19,14 @@ BEGIN {
 }
 our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
-   isa_pow2 round_up_to_pow2 round_up_to_multiple
+   isa_handle isa_pow2 round_up_to_pow2 round_up_to_multiple
    add skip find which finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
    S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
    S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
 );
 our %EXPORT_TAGS= (
    basic_methods => [qw( exporter add skip find which finish rewrite_path rewrite_user rewrite_group )],
-   isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_int isa_pow2 )],
+   isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_handle isa_int isa_pow2 )],
    stat_modes => [qw( S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT )],
    stat_tests => [qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT )],
 );
@@ -293,6 +293,7 @@ Is it a power of 2?
 
 sub isa_hash       :prototype($) { ref $_[0] eq 'HASH' }
 sub isa_array      :prototype($) { ref $_[0] eq 'ARRAY' }
+sub isa_handle     :prototype($) { ref $_[0] eq 'GLOB' || (ref $_[0] && (ref $_[0])->isa('IO::Handle')) }
 sub isa_int        :prototype($) { looks_like_number($_[0]) && int($_[0]) == $_[0] }
 sub isa_exporter   :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Exporter') }
 sub isa_export_dst :prototype($) { blessed($_[0]) && $_[0]->can('add') && $_[0]->can('finish') }

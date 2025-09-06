@@ -18,7 +18,7 @@ subtest fat12_math => sub {
       call fat_count             => 2;
       call fat_sector_count      => 12;
       call root_dirent_count     => 512;
-      call root_sector_count     => 32;
+      call root_dir_sector_count => 32;
       call data_start_sector     => 1 + 12 + 12 + 32;
       call total_sector_count    => 1 + 12 + 12 + 32 + (4000 * 8);
    }, 'default geometry for 5000 clusters' );
@@ -85,7 +85,7 @@ subtest align_clusters => sub {
                note sprintf " reserved=0x%Xsec fat=0x%Xsec root=0x%Xsec",
                   $geom->reserved_sector_count,
                   $geom->fat_sector_count,
-                  $geom->root_sector_count;
+                  $geom->root_dir_sector_count;
                ok( ($geom->data_start_device_offset & 4095) != 0, 'cluster not aligned by default' );
 
                # Now test with requesting alignment to 4K
@@ -96,7 +96,7 @@ subtest align_clusters => sub {
                note sprintf " reserved=0x%Xsec fat=0x%Xsec root=0x%Xsec",
                   $geom->reserved_sector_count,
                   $geom->fat_sector_count,
-                  $geom->root_sector_count;
+                  $geom->root_dir_sector_count;
                # Request media alignment numbers for 1K, 2K, 4K, 8K
                # but only test higher than 8K if cluster size is smaller.
                for my $align (1<<10, 1<<11, 1<<12, 1<<13) {

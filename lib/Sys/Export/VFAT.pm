@@ -5,10 +5,11 @@ package Sys::Export::VFAT;
 use v5.26;
 use warnings;
 use experimental qw( signatures );
-use Fcntl qw( S_IFDIR S_ISDIR S_ISREG );
+use Fcntl qw( S_IFDIR S_ISDIR S_ISREG SEEK_SET SEEK_END );
 use Scalar::Util qw( blessed dualvar refaddr );
 use List::Util qw( min max );
 use POSIX 'ceil';
+use Log::Any '$log';
 use Encode;
 use Carp;
 our @CARP_NOT= qw( Sys::Export Sys::Export::Unix );
@@ -28,7 +29,6 @@ our @EXPORT_OK= qw( FAT12 FAT16 FAT32 ATTR_READONLY ATTR_HIDDEN ATTR_SYSTEM ATTR
 use Sys::Export qw( :isa expand_stat_shorthand );
 use Sys::Export::VFAT::Geometry qw( FAT12 FAT16 FAT32 );
 use Sys::Export::VFAT::AllocationTable;
-use Log::Any '$log';
 
 =head1 SYNOPSIS
 
@@ -102,7 +102,7 @@ known.
 
 =constructor new
 
-  $fat= Sys::Export::VFAT->new($filename);
+  $fat= Sys::Export::VFAT->new($filename_or_handle);
   $fat= Sys::Export::VFAT->new(%attrs);
   $fat= Sys::Export::VFAT->new(\%attrs);
 
@@ -114,10 +114,9 @@ argument, it is treated as the filename attribute.
 sub new($class, @attrs) {
    my %attrs= @attrs != 1? @attrs
             : isa_hash $attrs[0]? %{$attrs[0]}
+            : isa_handle $attrs[0]? ( filehandle => $attrs[0] )
             : ( filename => $attrs[0] );
-   length $attrs{filename} or croak "filename is required";
    my $self= bless {
-      filename => delete $attrs{filename},
       _root => {
          mode => S_IFDIR,
          uname => '',
@@ -135,14 +134,19 @@ sub new($class, @attrs) {
 
 =attribute filename
 
-Name of file to write.  Note that this cannot be a device file unless you zero it first, because
-this module makes the assumption that it doesn't need to write the zero padding, because the
-file should have been zeroed by truncate().
+Name of file (or device) to write.  If the file exists it will be truncated before writing.
+If you want to write the filesystem amid existing data (like a partition table0, pass a file
+handle as C<out_fh>.
+
+=attribute filehandle
+
+Output filehandle to write.  The file will be enlarged if it is not big enough.
 
 =cut
 
 sub _root { $_[0]{_root} }
-sub filename { $_[0]{filename} }
+sub filename { @_ > 1? ($_[0]{filename}= $_[1]) : $_[0]{filename} }
+sub filehandle { @_ > 1? ($_[0]{filehandle}= $_[1]) : $_[0]{filehandle} }
 
 =attribute geometry
 
@@ -258,14 +262,14 @@ sub volume_label($self, @val) {
   $fat->add(\%file_attrs);
   # Attributes:
   # {
-  #   name               => $path_utf8_bytes,
+  #   name               => $path_bytes,
   #   uname              => $path_unicode_string,
   #   FAT_shortname      => "8CHARATR.EXT",
   #   mode               => $unix_stat_mode,
   #   FAT_attrs          => ATTR_READONLY|ATTR_HIDDEN|ATTR_SYSTEM|ATTR_ARCHIVE,
   #   atime              => $unix_epoch,
   #   mtime              => $unix_epoch,
-  #   crtime             => $unix_epoch,
+  #   btime              => $unix_epoch,
   #   size               => $data_size,
   #   data               => $literal_data,
   #   data_path          => $abs_path_to_data,
@@ -444,20 +448,35 @@ sub finish($self) {
    $self->{geometry}= $geom;
    $self->{allocation_table}= $alloc;
 
-   open my $fh, '+>', $self->filename
-      or croak "open: $!";
-   truncate($fh, $geom->total_size)
-      or croak "truncate: $!";
+   my $fh= $self->filehandle;
+   if (!$fh) {
+      defined $self->filename or croak "Must set filename or out_fh attributes";
+      open $fh, '+>', $self->filename
+         or croak "open: $!";
+   }
+   # check size by seeking to end
+   my $pos= sysseek($fh, 0, SEEK_END);
+   if ($pos < $geom->volume_offset + $geom->total_size) {
+      truncate($fh, $geom->volume_offset + $geom->total_size)
+         or croak "truncate: $!";
+   }
    $self->_write_filesystem($fh, $geom, $alloc, [ @files, @dirs ]);
-   $fh->close or croak "close: $!";
+   unless ($self->filehandle) {
+      $fh->close or croak "close: $!";
+   }
    1;
 }
 
 sub _write_block_at {
    my ($fh, $addr, undef, $ofs, $size)= @_;
-   sysseek($fh, $addr, 0) or croak "sysseek($addr): $!";
+   sysseek($fh, $addr, SEEK_SET) or croak "sysseek($addr): $!";
    $ofs //= 0;
-   $size //= length($_[2]) - $ofs;
+   my $avail= length($_[2]) - $ofs;
+   $size //= $avail;
+   # always write full size, padding with zeroes
+   if ($avail < $size) {
+      splice(@_, 2, 1, $_[2].("\0"x($size-$avail)));
+   }
    my $wrote= syswrite($fh, $_[2], $size, $ofs);
    croak "syswrite: $!" if !defined $wrote;
    croak "Unexpected short write ($wrote != $size)" if $wrote != $size;
@@ -471,11 +490,8 @@ sub _write_clusters {
    my $data_ofs= 0;
    for (my $i= 0; $i < @$alloc_invlist && $data_ofs < length($_[0]); $i += 2) {
       my ($cl_start, $cl_lim)= @{$alloc_invlist}[$i, $i+1];
-      my $size= min(
-         ($cl_lim-$cl_start) * $geom->bytes_per_cluster,
-         length($_[0]) - $data_ofs
-      );
-      _write_block_at($fh, $geom->get_cluster_offset($cl_start), $_[0], $data_ofs, $size);
+      my $size= ($cl_lim-$cl_start) * $geom->bytes_per_cluster;
+      _write_block_at($fh, $geom->get_cluster_device_offset($cl_start), $_[0], $data_ofs, $size);
       $data_ofs += $size;
    }
 }
@@ -488,22 +504,23 @@ sub _write_filesystem($self, $fh, $geom, $alloc, $files) {
       or croak "Max element of 'fat_entries' should be ".$geom->max_cluster_id.", but was ".$alloc->max_cluster_id;
    # Pack the boot sector and other reserved sectors
    my $buf= $self->_pack_reserved_sectors();
-   _write_block_at($fh, 0, $buf);
+   my $ofs= $self->volume_offset;
+   _write_block_at($fh, $ofs, $buf, 0, $geom->reserved_size);
+   $ofs += $geom->reserved_size;
    # Pack the allocation tables
    $buf= $alloc->pack;
    # store a copy of this into each of the regions occupied by fats
-   my $ofs= $geom->reserved_sector_count * $geom->bytes_per_sector;
    for (my $i= 0; $i < $geom->fat_count; $i++) {
-      _write_block_at($fh, $ofs, $buf);
-      $ofs += $geom->fat_sector_count * $geom->bytes_per_sector;
+      _write_block_at($fh, $ofs, $buf, 0, $geom->fat_size);
+      $ofs += $geom->fat_size;
    }
    # For FAT12/FAT16, write the root directory entries
    if ($geom->bits < FAT32) {
       my $root= $self->{_root};
       die "BUG: mis-sized FAT16 root directory"
          if !$root->{size} || ($root->{size} & 31) || length $root->{data} != $root->{size}
-            || $root->{size} > $geom->root_sector_count * $geom->bytes_per_sector;
-      _write_block_at($fh, $geom->root_dir_offset, $root->{data});
+            || $root->{size} > $geom->root_dir_size;
+      _write_block_at($fh, $ofs, $root->{data}, 0, $geom->root_dir_size);
    }
    # The files and dirs have all been assigned clusters by _optimize_geometry
    for my $f (@$files) {
