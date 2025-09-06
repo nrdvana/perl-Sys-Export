@@ -7,6 +7,7 @@ use experimental qw( signatures );
 use parent 'Test2::V0';
 use File::Temp;
 use IO::Handle;
+use Log::Any::Adapter 'TAP';
 
 our @EXPORT= (
    @Test2::V0::EXPORT,

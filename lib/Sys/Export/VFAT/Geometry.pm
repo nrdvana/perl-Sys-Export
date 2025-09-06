@@ -441,8 +441,13 @@ sub root_dir_offset($self) { $self->root_dir_start_sector * $self->bytes_per_sec
 sub data_start_sector($self) {
    $self->{data_start_sector} //= $self->root_dir_start_sector + $self->root_sector_count;
 }
+sub data_limit_sector($self) {
+   $self->data_start_sector + $self->cluster_count * $self->sectors_per_cluster
+}
 sub data_start_offset($self) { $self->data_start_sector * $self->bytes_per_sector }
+sub data_limit_offset($self) { $self->data_limit_sector * $self->bytes_per_sector } 
 sub data_start_device_offset($self) { $self->data_start_offset + $self->device_offset }
+sub data_limit_device_offset($self) { $self->data_limit_offset + $self->device_offset }
 
 sub data_sector_count($self) {
    $self->total_sector_count - $self->data_start_sector;
@@ -527,6 +532,8 @@ It dies if this range overflows the available clusters.
 
 sub get_cluster_extent_of_volume_extent($self, $offset, $size) {
    my $cl_start= $self->get_cluster_of_offset($offset);
+   $cl_start
+      or croak "Offset $offset falls outside of cluster data region";
    $self->get_cluster_offset($cl_start) == $offset
       or croak "FAT_offset not aligned to a cluster boundary";
    my $cl_cnt= ceil($size / $self->bytes_per_cluster);
