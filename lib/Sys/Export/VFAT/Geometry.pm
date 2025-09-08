@@ -438,7 +438,7 @@ Returns the total size in bytes of the volume.  C<< total_sector_count * bytes_p
 
 sub bits                  { $_[0]{bits} }
 sub reserved_sector_count { $_[0]{reserved_sector_count} }
-sub reserved_size         { $_[0]{reserved_sector_count} & $_[0]->bytes_per_sector }
+sub reserved_size         { $_[0]{reserved_sector_count} * $_[0]->bytes_per_sector }
 sub fat_count             { $_[0]{fat_count} }
 sub fat_sector_count      { $_[0]{fat_sector_count} }
 sub fat_size              { $_[0]{fat_sector_count} * $_[0]->bytes_per_sector }

@@ -43,7 +43,23 @@ subtest device_align_placement => sub {
 subtest test_mounts => sub {
    skip_all 'Set TEST_MOUNTS=1 to enable tests that call "mount"'
       unless $ENV{TEST_MOUNTS};
+
+   my $tmp= File::Temp->newdir;
+   my $dst= Sys::Export::VFAT->new(filename => "fs");
+   $dst->add([ dir => "a" ]);
+   $dst->add([ dir => "a/b" ]);
+   $dst->add([ dir => "a/b/c" ]);
+   my $data= "Example Data";
+   $dst->add([ file => "a/b/c/.d/config", $data ]);
+   $dst->finish;
    
+   mkdir "$tmp/mnt" or die "mkdir: $!";
+   if (is( system('mount', "$tmp/fs", "$tmp/mnt"), 0, "mount $tmp/mnt" )) {
+      ok( -d "$tmp/mnt/a/b/c/.d", 'a/b/c/d exist' );
+      ok( -f "$tmp/mnt/a/b/c/.d/config", "a/b/c/.d/config exists" );
+      is( slurp("$tmp/mnt/a/b/c/.d/config"), $data, 'a/b/c/.d/config content' );
+      is( system('umount', "$tmp/mnt"), 0, "umount $tmp/mnt" );
+   }
 };
 
 done_testing;
