@@ -399,7 +399,7 @@ sub add($self, $file) {
       if (ref $ent->{device_offset} eq 'SCALAR') {
          my $offset_ref= delete $ent->{device_offset};
          my $callback= sub($self2, $cl_id, $file) {
-            $$offset_ref= $self2->geometry->get_cluster_device_offset($cl_id)
+            $$offset_ref= $cl_id < 2? undef : $self2->geometry->get_cluster_device_offset($cl_id);
          };
          $ent->{FAT_cluster}= [ undef, $callback ];
          $ent->{device_align} //= 512; # mark file as needing to be a single extent
@@ -444,14 +444,18 @@ sub finish($self) {
    $self->_finalize_dir($root, undef, \my @dirs, \my @files);
    # calculate what geometry gives us the best size, when rounding each file to that cluster
    # size vs. the size of the FAT it generates
-   my ($geom, $alloc)= $self->_optimize_geometry(\@dirs, \@files)
+   my ($geom, $alloc, $cluster_assignment)= $self->_optimize_geometry(\@dirs, \@files)
       or croak join("\n", "No geometry options can meet your device_offset / device_align requests:",
             map "$_: $self->{_optimize_geometry_fail_reason}{$_}",
                sort { $a <=> $b } keys $self->{_optimize_geometry_fail_reason}->%*
          );
-   $self->_pack_dir($_) for reverse(@dirs), $root;
    $self->{geometry}= $geom;
    $self->{allocation_table}= $alloc;
+   # Apply file cluster IDs to the file->{FAT_cluster} attributes
+   $self->_resolve_cluster($_->[1], $_->[0])
+      for values %$cluster_assignment;
+   # Pack directories now that file clusters are known
+   $self->_pack_dir($_) for reverse(@dirs), $root;
 
    my $fh= $self->filehandle;
    if (!$fh) {
@@ -642,8 +646,10 @@ sub _finalize_dir($self, $dir, $parent, $dirlist, $filelist) {
             }
          }
          # empty files get assigned cluster 0
-         $_->{FAT_cluster}[0]= 0;
-         $self->_resolve_cluster($_, 0) if $_->{FAT_cluster}->@* > 1;
+         if (!$_->{size}) {
+            $_->{FAT_cluster}[0]= 0;
+            $self->_resolve_cluster($_, 0) if $_->{FAT_cluster}->@* > 1;
+         }
       }
       else {
          # TODO: add conditional symlink support via hardlinks
@@ -659,13 +665,11 @@ sub _finalize_dir($self, $dir, $parent, $dirlist, $filelist) {
          uname => "$dir->{uname}/.",
          mode => S_IFDIR,
          FAT_short11 => '.',
-         FAT_shortname => '.',
          FAT_cluster => $dir->{FAT_cluster},
       }, {
          uname => "$dir->{uname}/..",
          mode => S_IFDIR,
          FAT_short11 => '..',
-         FAT_shortname => '..',
          FAT_cluster => $parent->{FAT_cluster},
       };
    }
@@ -676,9 +680,10 @@ sub _finalize_dir($self, $dir, $parent, $dirlist, $filelist) {
          unless is_valid_volume_label($label);
       unshift @ents, {
          uname => "(volume label)",
-         FAT_short11 => $label,
          mode => 0,
+         FAT_short11 => $label,
          FAT_attrs => ATTR_VOLUME_ID,
+         FAT_cluster => [ 0 ],
       };
    }
    $dir->{FAT_dirents}= \@ents;
@@ -847,10 +852,7 @@ sub _optimize_geometry($self, $dirs, $files) {
       $self->{_optimize_geometry_fail_reason}= \%fail_reason;
       return;
    }
-   # Apply file cluster IDs to the file->{FAT_cluster} attributes
-   $self->_resolve_cluster($_->[1], $_->[0])
-      for values %{ $best->{file_cluster} };
-   return @{$best}{'geom','alloc'};
+   return @{$best}{'geom','alloc','file_cluster'};
 }
 
 # This returns a valid 8.3 filename which doesn't conflict with any of the keys in %$existing
