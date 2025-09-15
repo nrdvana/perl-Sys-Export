@@ -87,9 +87,7 @@ L</on_collision>.
 
 =item log
 
-This can either be a Log::Any instance, or a string specifying a log level such as "debug"
-or "trace".  The default logging is on STDOUT (level 'info') and simply lists the files being
-copied and whether they were patched.
+An instance of L<Log::Any> logger, or compatible object.
 
 =back
 
@@ -105,6 +103,7 @@ use List::Util qw( max );
 use Sys::Export qw( :isa :stat_modes :stat_tests );
 use File::Temp ();
 use POSIX ();
+use Sys::Export::LogAny;
 require Sys::Export::Exporter;
 our @CARP_NOT= qw( Sys::Export );
 our @ISA= qw( Sys::Export::Exporter );
@@ -151,6 +150,7 @@ sub new {
       if $attrs{_dst}->can('tmp');
    # otherwise use system tmp dir
    $attrs{tmp} //= File::Temp->newdir;
+   $attrs{log} //= Sys::Export::LogAny->get_logger;
 
    # Upgrade src_userdb and dst_userdb if provided as hashrefs
    for (qw( src_userdb dst_userdb )) {
@@ -165,10 +165,9 @@ sub new {
 
    my $self= bless \%attrs, $class;
 
-   $self->_build_log_fn($self->{log} //= 'info');
    # Run the accessor logic to initialize the parameter
-   for my $method (qw( src_exe_PATH )) {
-      $self->$method(delete $self->{$method});
+   for my $method (qw( src_exe_PATH log )) {
+      $self->$method(delete $self->{$method})
    }
    # Special cases - call the method once for each key/value pair
    for my $method (qw( rewrite_path rewrite_user rewrite_group )) {
@@ -261,6 +260,10 @@ The set of numeric user IDs which have been written to dst.
 
 The set of numeric group IDs which have been written to dst.
 
+=attribute log
+
+Get or set the L<Log::Any> (or compatible) logger object.
+
 =cut
 
 sub src($self)          { $self->{src} }
@@ -275,6 +278,13 @@ sub dst_uid_used($self) { $self->{dst_uid_used} //= {} }
 sub dst_gid_used($self) { $self->{dst_gid_used} //= {} }
 sub src_userdb($self)   { $self->{src_userdb} }
 sub dst_userdb($self)   { $self->{dst_userdb} }
+sub log {
+   if (@_ > 1) {
+      croak "Expected Log::Any-compatible object" unless blessed($_[1]) && $_[1]->can('infof');
+      $_[0]{log}= $_[1];
+   }
+   $_[0]{log};
+}
 
 sub src_exe_PATH($self, @value) {
    $self->src_exe_PATH_list(map split(/:/, $_, -1), @value) if @value;
@@ -364,9 +374,8 @@ sub _elf_interpreters($self) { $self->{elf_interpreters} //= {} }
 # Can we use strace (or similar) on binaries in src to see all files they touch?
 sub _can_trace_deps($self) {
    $self->{_can_trace_deps} //= do {
-      eval { $self->{_trace_deps} //= $self->_build__trace_deps };
-      $self->{_log_debug}->("Error building _trace_deps function: $@")
-         if $self->{_log_debug} && !defined $self->{_trace_deps};
+      eval { $self->{_trace_deps} //= $self->_build__trace_deps }
+         or $self->log->debug("Error building _trace_deps function: $@");
       !!$self->{_trace_deps};
    };
 }
@@ -407,51 +416,8 @@ sub on_collision($self, @value) {
    $self->{on_collision}
 }
 
-=attribute log
-
-  $exporter->log('info');
-  $exporter->log($logger);
-
-Set the logging output object, or log level for 'print' output.
-
-=cut
-
-sub log {
-   if (@_ > 1) {
-      $_[0]->_build_log_fn($_[1]);
-      $_[0]{log}= $_[1];
-   }
-   $_[0]{log}
-}
-
-# This is a silly approximation of Log::Any to avoid having that as a dependency
-our %LOG_LEVELS = (
-   EMERGENCY => 0,
-   ALERT     => 1,
-   CRITICAL  => 2,
-   ERROR     => 3,
-   WARNING   => 4,
-   NOTICE    => 5,
-   INFO      => 6,
-   DEBUG     => 7,
-   TRACE     => 8,
-);
-sub _build_log_fn($self, $dest) {
-   if (ref $dest && $dest->can('info')) {
-      $self->{_log_info}=  $dest->is_info?  sub { $dest->info(@_) }  : undef;
-      $self->{_log_debug}= $dest->is_debug? sub { $dest->debug(@_) } : undef;
-      $self->{_log_trace}= $dest->is_trace? sub { $dest->trace(@_) } : undef;
-   } elsif (my $i_lev= $LOG_LEVELS{uc $dest}) {
-      $self->{_log_info}=  $LOG_LEVELS{INFO}  <= $i_lev? sub { say @_ } : undef;
-      $self->{_log_debug}= $LOG_LEVELS{DEBUG} <= $i_lev? sub { say @_ } : undef;
-      $self->{_log_trace}= $LOG_LEVELS{TRACE} <= $i_lev? sub { say @_ } : undef;
-   } else {
-      croak "Log '$dest' is not a Log::Any instance or known log level";
-   }
-}
-
 sub _log_action($self, $verb, $src, $dst, @notes) {
-   if ($self->{_log_info}) {
+   if ($self->log->is_info) {
       # Track the width of the previous 10 filenames to provide easy-to-read consistent indenting
       my $widths= ($self->{_log_name_widths} //= []);
       unshift @$widths, length($src);
@@ -459,8 +425,8 @@ sub _log_action($self, $verb, $src, $dst, @notes) {
       my $width= max(24, @$widths);
       # Then round width to a multiple of 8
       $width= ($width + 7) & ~7;
-      $self->{_log_info}->(sprintf "%3s %-*s -> %s", $verb, $width, $src, $dst);
-      $self->{_log_info}->(sprintf "     %s", $_) for @notes;
+      $self->log->infof("%3s %-*s -> %s", $verb, $width, $src, $dst);
+      $self->log->infof("     %s", $_) for @notes;
    }
 }
 
@@ -526,8 +492,8 @@ sub _chroot_abs_path($self, $root, $path) {
       }
    }
    my $abs= join '/', @abs[scalar @base .. $#abs];
-   $self->{log_trace}->("Absolute path of '$path' within root '$root' is '$abs'")
-      if $self->{log_trace} && $abs ne $path;
+   $self->log->tracef("Absolute path of '%s' within root '%s' is '%s'", $path, $root, $abs)
+      if $abs ne $path;
    return $abs;
 }
 
@@ -727,15 +693,15 @@ sub add {
       } else {
          %file= ( src_path => $next );
       }
-      $self->{_log_debug}->("Exporting".(defined $file{src_path}? " $file{src_path}" : '').(defined $file{name}? " to $file{name}":''))
-         if $self->{_log_debug};
+      $self->log->debug("Exporting".(defined $file{src_path}? " $file{src_path}" : '').(defined $file{name}? " to $file{name}":''))
+         if $self->log->is_debug;
       # Translate src to dst if user didn't supply a 'name'
       if (!defined $file{name} || !defined $file{mode}) {
          my $src_path= $file{src_path};
          defined $src_path or croak(!defined $file{mode}? "Require src_path to determine 'mode'" : "Require 'name' (or 'src_path' to derive name)");
          # ignore repeat requests
          if (exists $self->{src_path_set}{$src_path} && !defined $file{name}) {
-            $self->{_log_debug}->("  (already exported '$src_path')") if $self->{_log_debug};
+            $self->log->debugf("  (already exported '%s')", $src_path);
             next;
          }
          # Need to immediately abs-path the parent dir of this path in case src_path follows
@@ -745,11 +711,11 @@ sub add {
          if (!defined $real_src_path) {
             croak "No such path $src_path";
          } elsif ($real_src_path ne $src_path) {
-            $self->{_log_debug}->("Resolved to '$real_src_path'") if $self->{_log_debug};
+            $self->log->debugf("Resolved to '%s'", $real_src_path);
             # ignore repeat requests
             if (exists $self->{src_path_set}{$real_src_path}) {
                $self->{src_path_set}{$src_path}= $self->{src_path_set}{$real_src_path};
-               $self->{_log_debug}->("  (already exported '$real_src_path')") if $self->{_log_debug};
+               $self->log->debugf("  (already exported '%s')", $real_src_path);
                next;
             }
          }
@@ -802,10 +768,10 @@ sub add {
                $action= ($file{src_path}//'') eq $orig? 'ignore' : 'croak';
             }
             if ($action eq 'ignore') {
-               $self->{_log_debug}->("Already exported to '$file{name}' previously from '$orig'") if $self->{_log_debug};
+               $self->log->debugf("Already exported to '%s' previously from '%s'", $file{name}, $orig);
                next;
             } elsif ($action eq 'overwrite') {
-               $self->{_log_debug}->("Overwriting '$file{name}'") if $self->{_log_debug};
+               $self->log->debugf("Overwriting '%s'", $file{name});
                # let dst handle overwrite...
             } elsif ($action eq 'croak') {
                croak "Already exported '$file{name}'".(length $orig? " which came from $orig":"");
@@ -818,10 +784,10 @@ sub add {
       else {
          my $dst_parent= $file{name} =~ s,/?[^/]+$,,r;
          if (length $dst_parent && !exists $self->{dst_path_set}{$dst_parent}) {
-            $self->{_log_debug}->("  parent dir '$dst_parent' is not exported yet") if $self->{_log_debug};
+            $self->log->debugf("  parent dir '%s' is not exported yet", $dst_parent);
             # if writing to a real dir, check whether it already exists by some other means
             if ($self->_dst->can('dst_abs') && -d $self->_dst->dst_abs . $dst_parent) {
-               $self->{_log_debug}->("  ".$self->_dst->dst_abs . "$dst_parent already exists in the filesystem") if $self->{_log_debug};
+               $self->log->debugf("  %s%s already exists in the filesystem", $self->_dst->dst_abs, $dst_parent);
                # no need to do anything, but record that we have it
                $self->{dst_path_set}{$dst_parent}= undef;
             }
@@ -832,7 +798,7 @@ sub add {
                # If no rewrites, src_parent is the same as dst_parent
                if (!$self->_has_rewrites) {
                   $src_parent //= $dst_parent;
-                  $self->{_log_debug}->("  will export $src_parent first") if $self->{_log_debug};
+                  $self->log->debugf("  will export %s first", $src_parent);
                }
                elsif (!length $src_parent || $self->get_dst_for_src($src_parent) ne $dst_parent) {
                   # No src_path means we don't have an origin for this file, so no official
@@ -845,11 +811,10 @@ sub add {
                      && S_ISDIR($dir{mode})
                   ) {
                      $src_parent= \%dir;
-                     $self->{_log_debug}->("  will export $dst_parent first, using permissions from $self->{src_abs}$dst_parent") if $self->{_log_debug};
-
+                     $self->log->debugf("  will export %s first, using permissions from %s%s", $dst_parent, $self->{src_abs}, $dst_parent);
                   } else {
                      $src_parent= { name => $dst_parent, mode => (S_IFDIR | 0755) };
-                     $self->{_log_debug}->("  will export $dst_parent first, using default 0755 permissions") if $self->{_log_debug};
+                     $self->log->debugf("  will export %s first, using default 0755 permissions", $dst_parent);
                   }
                }
                unshift @add, $src_parent, \%file;
@@ -1028,8 +993,8 @@ rewrite rules.  If no rewrites exist, this just returns C<$src_path>.
 sub get_dst_for_src($self, $path) {
    my $rre= $self->path_rewrite_regex;
    my $rewrote= $path =~ s/^$rre/$self->{path_rewrite_map}{$1}/er;
-   $self->{_log_trace}->("  rewrote '$path' to '$rewrote'")
-      if $self->{_log_trace} && $path ne $rewrote;
+   $self->log->tracef("  rewrote '%s' to '%s'", $path, $rewrote)
+      if $path ne $rewrote;
    return $rewrote;
 }
 
@@ -1091,8 +1056,7 @@ sub _export_file($self, $file) {
    my $prev;
    if ($file->{nlink} > 1 && defined $file->{data_path}) {
       if (defined($prev= $self->_link_map->{"$file->{dev}:$file->{ino}"})) {
-         $self->{_log_debug}->("Already exported inode $file->{dev}:$file->{ino} as '$prev'")
-            if $self->{_log_debug};
+         $self->log->debugf("Already exported inode %s:%s as '%s'", $file->{dev}, $file->{ino}, $prev);
          # make a link of that file instead of copying again
          $self->_log_action("LNK", $prev, $file->{name});
          # ensure the dst realizes it is a symlink by sending it without data
@@ -1145,10 +1109,10 @@ override.
 sub process_file($self, $file, $notes) {
    # Check for ELF signature or script-interpreter
    if (substr($file->{data}, 0, 4) eq "\x7fELF") {
-      $self->{_log_trace}->("Detected ELF signature in '$file->{name}'") if $self->{_log_trace};
+      $self->log->tracef("Detected ELF signature in '%s'", $file->{name});
       $self->process_elf_file($file, $notes);
    } elsif ($file->{data} =~ m,^#!\s*/(\S+),) {
-      $self->{_log_trace}->("Detected script interpreter '$1' in '$file->{name}'") if $self->{_log_trace};
+      $self->log->tracef("Detected script interpreter '%s' in '%s'", $1, $file->{name});
       $self->process_script_file($file, $notes);
    }
 }
@@ -1159,7 +1123,7 @@ sub _resolve_src_library($self, $libname, $rpath) {
       $path =~ s,^/,,; # remove leading slash because src_abs ends with slash
       $path =~ s,(?<=[^/])\z,/, if length $path; # add trailing slash if it isn't the root
       if (-e $self->{src_abs} . $path . $libname) {
-         $self->{_log_trace}->("  found $libname at $path$libname") if $self->{_log_trace};
+         $self->log->tracef("  found %s at %s%s", $libname, $path, $libname);
          return $path . $libname;
       }
    }
@@ -1180,8 +1144,7 @@ sub process_elf_file($self, $file, $notes) {
    my $elf= Sys::Export::ELF::unpack($file->{data});
    my ($interpreter, @libs);
    if ($elf->{dynamic}) {
-      $self->{_log_debug}->("Dynamic-linked ELF file: '$file->{name}' (src_path=$file->{src_path})")
-         if $self->{_log_debug};
+      $self->log->debugf("Dynamic-linked ELF file: '%s' (src_path=%s)", $file->{name}, $file->{src_path});
       if ($elf->{needed_libraries}) {
          for (@{$elf->{needed_libraries}}) {
             my $lib= $self->_resolve_src_library($_, $elf->{rpath}) // carp("Can't find lib $_ needed for $file->{src_path}");
@@ -1195,8 +1158,7 @@ sub process_elf_file($self, $file, $notes) {
          $interpreter= $elf->{interpreter};
          $self->add($interpreter);
       }
-      $self->{_log_debug}->("  interpreter = ".($interpreter//'').", libs = @libs")
-         if $self->{_log_debug};
+      $self->log->debugf("  interpreter = %s, libs = %s", $interpreter, \@libs);
    }
    # Is any path rewriting requested?
    if ($self->_has_rewrites && length $file->{src_path} && defined $interpreter) {
@@ -1213,8 +1175,7 @@ sub process_elf_file($self, $file, $notes) {
             $rpath{$dst_lib}= 1;
          }
          my $rpath= join ':', map "/$_", keys %rpath;
-         $self->{_log_debug}->("  rewritten interpreter = $interpreter, rpath = $rpath")
-            if $self->{_log_debug};
+         $self->log->debugf("  rewritten interpreter = %s, rpath = %s", $interpreter, $rpath);
 
          # Create a temporary file so we can run patchelf on it
          my $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
@@ -1226,7 +1187,7 @@ sub process_elf_file($self, $file, $notes) {
          $file->{data_path}= $tmp;
          push @$notes, '+patchelf';
       } else {
-         $self->{_log_debug}->("  no interpreter/lib paths affected by rewrites") if $self->{_log_debug};
+         $self->log->debug("  no interpreter/lib paths affected by rewrites");
       }
    }
 }
@@ -1261,9 +1222,9 @@ sub process_script_file($self, $file, $notes) {
       if (defined (my $path= $self->src_which($name))) {
          $self->add($path);
          $interp= $path;
-         $self->{_log_trace}->("Detected secondary script interpreter '$path' in '$file->{name}'") if $self->{_log_trace};
+         $self->log->tracef("Detected secondary script interpreter '%s' in '%s'", $path, $file->{name});
       } else {
-         $self->{_log_trace}->("Detected secondary script interpreter '$1' in '$file->{name}' but can't locate it") if $self->{_log_trace};
+         $self->log->tracef("Detected secondary script interpreter '%s' in '%s' but can't locate it", $name, $file->{name});
       }
    }
 
@@ -1310,7 +1271,7 @@ A variant of L</process_file> for any perl script or module.
 
 sub _get_perl_script_deps($self, $file) {
    my $interp= $file->{interpreter} // $self->src_which('perl');
-   $self->{_log_trace}->("Checking perl script $file->{name} for dependencies") if $self->{_log_trace};
+   $self->log->tracef("Checking perl script %s for dependencies", $file->{name});
    # We can run the actual perl interpreter with '-c' on this file, so long as
    # src_path is defined and an strace implementation is available.
    if ($self->_can_trace_deps && length $file->{src_path}) {
@@ -1325,13 +1286,13 @@ sub _get_perl_script_deps($self, $file) {
          }
       }
       my @cmd= ($interp, '-c', (map "-I$_", @inc), $file->{src_path} );
-      $self->{_log_debug}->("Tracing perl deps with @cmd") if $self->{_log_debug};
+      $self->log->debugf("Tracing perl deps with %s", \@cmd);
       my $deps= eval { $self->_trace_deps(@cmd) };
       return sort keys %$deps if defined $deps;
-      $self->{_log_debug}->("strace failed: $@") if $self->{_log_debug};
+      $self->log->debugf("strace failed: %s", $@);
    }
    
-   $self->{_log_trace}->("strace unavailable, falling back to source scan") if $self->{_log_trace};
+   $self->log->trace("strace unavailable, falling back to source scan");
    return;
 }
 
@@ -1358,8 +1319,8 @@ sub _export_symlink($self, $file) {
       # If target is relative and the data_path wasn't inside the src_abs tree, then not
       # sensible to export it.
       if ($file->{data} !~ m,^/, and substr($file->{data_path}, 0, length $self->{src_abs}) ne $self->{src_abs}) {
-         $self->{_log_debug}->("Symlink $file->{name} read from $file->{data_path} which is outside $self->{src_abs}; not adding symlink target $file->{data}")
-            if $self->{_log_debug};
+         $self->log->debugf('Symlink %s read from %s which is outside %s; not adding symlink target %s',
+            $file->{name}, $file->{data_path}, $self->{src_abs}, $file->{data});
       }
       else {
          # make relative path absolute
@@ -1368,10 +1329,10 @@ sub _export_symlink($self, $file) {
          my $abs_target= $self->_src_parent_abs_path($target);
          # Only queue it if it exists.  Exporting dangling symlinks is not an error
          if (defined $abs_target && lstat $self->{src_abs} . $abs_target) {
-            $self->{_log_debug}->("Queueing target '$target' of symlink '$file->{name}'") if $self->{_log_debug};
+            $self->log->debugf("Queueing target '%s' of symlink '%s'", $target, $file->{name});
             $self->add($target);
          } else {
-            $self->{_log_debug}->("Symlink '$file->{name}' target '$target' doesn't exist") if $self->{_log_debug};
+            $self->log->debugf("Symlink '%s' target '%s' doesn't exist", $file->{name}, $target);
          }
       }
    }
@@ -1534,7 +1495,7 @@ sub _capture_cmd {
 
 our $patchelf;
 sub _patchelf($self, $path, @args) {
-   $self->{_log_trace}->("  patchelf @args $path") if $self->{_log_trace};
+   $self->log->tracef("  patchelf %s %s", \@args, $path);
    unless ($patchelf) {
       chomp($patchelf= `which patchelf`);
       croak "Missing tool 'patchelf'"

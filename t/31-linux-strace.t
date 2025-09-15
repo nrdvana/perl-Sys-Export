@@ -17,7 +17,7 @@ package Sys::Export::MockDst {
 
 my $tmp= File::Temp->newdir;
 my $dst= Sys::Export::MockDst->new();
-my $exporter= Sys::Export::Linux->new(src => "/", dst => $dst, log => 'info');
+my $exporter= Sys::Export::Linux->new(src => "/", dst => $dst);
 
 skip_all "strace not supported in this environment"
    unless $exporter->_can_trace_deps;
