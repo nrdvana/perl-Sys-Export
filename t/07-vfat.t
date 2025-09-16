@@ -74,7 +74,7 @@ subtest device_addr_placement => sub {
 
    sysseek $tmp, $addr, 0 or die "seek: $!";
    sysread $tmp, my $buf, length $token or die "read: $!";
-   is( $buf, $token, 'Found token at addr' );
+   is( $buf, $token, sprintf "Found token at 0x%X", $addr );
 };
 
 subtest device_align_placement => sub {

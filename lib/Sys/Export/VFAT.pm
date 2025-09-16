@@ -1,15 +1,15 @@
 package Sys::Export::VFAT;
-# ABSTRACT: Write CPIO archives needed for Linux initrd
+# ABSTRACT: Write minimal FAT12/16/32 filesystems with control over stored file extents
 # VERSION
 
 use v5.26;
 use warnings;
 use experimental qw( signatures );
 use Fcntl qw( S_IFDIR S_ISDIR S_ISREG SEEK_SET SEEK_END );
-use Scalar::Util qw( blessed dualvar refaddr );
+use Scalar::Util qw( blessed dualvar refaddr weaken );
 use List::Util qw( min max );
 use POSIX 'ceil';
-use Log::Any '$log';
+use Sys::Export::LogAny '$log';
 use Encode;
 use Carp;
 our @CARP_NOT= qw( Sys::Export Sys::Export::Unix );
@@ -32,21 +32,39 @@ use Sys::Export::VFAT::AllocationTable;
 
 =head1 SYNOPSIS
 
-  my $dst= Sys::Export::VFAT->new(filename => $path, volume_label => 'ESP');
-  $dst->add(\%file_attrs);
-  ...
+  my $dst= Sys::Export::VFAT->new(
+    filename => $path,
+    volume_label => 'ESP'
+    volume_offset => 2048*512, # inform VFAT of your partition layout
+  );
+  # Basic files and directories
+  $dst->add([ file => "README.TXT", "Hello World\r\n" ]);
+  $dst->add([ file => 'EFI/BOOT/BOOTIA32.EFI', { data_path => $loader }]);
+  
+  # Request file 'initrd' have its bytes stored at exactly disk offset 0x110000
+  $dst->add([ file => 'initrd', { data_path => $initrd, device_offset => 0x110000 }]);
+  
+  # Request file 'vmlinuz' have its bytes stored aligned to 2048 disk address,
+  #  and capture the location that was chosen into $kernel_ofs
+  $dst->add(
+    name => 'vmlinuz',
+    mode => S_IFREG, # stat constant
+    data_path => $path_to_kernel,
+    device_align => 2048,
+    device_offset => \my $kernel_ofs,
+  );
+  
   $dst->finish;
-  # $path now contains a Fat32, Fat16, or Fat12 filesystem
 
 =head1 DESCRIPTION
 
 This module can be used as an export destination to build a FAT32/16/12 filesystem by directly
 encoding your files into a very compact VFAT layout.  The generated filesystem has no
-fragmentation and no free space.
+fragmentation and no free space (unless you specified device_offset/device_align in a way that
+created "holes" in your cluster array).
 
 This implementation caches all files in memory, and then chooses FAT parameters that result in
-the smallest image.  If you know ahead of time the cluster size you want and how many clusters
-to allocate, this module can instead stream your files into the destination.
+the smallest image.
 
 This implementation also has some fun features intended to work together with the
 L<ISOHybrid|Sys::Export::ISOHybrid> module, which can (on the assumption that the filesystem will
@@ -55,50 +73,23 @@ at specific offsets within the generated image.
 
 =head2 FAT Geometry
 
-To understand the attributes of this module, it helps to first understand how FAT is structured.
-
-FAT defines a Sector as some number of bytes (generally 512) and then a Cluster as a number of
-Sectors.  The overall image consists of a header, two allocation tables, and then the data area.
-The allocation table is essentially an array of cluster pointers, the second allocation table is
-a backup copy of the first, and the data area is an array of clusters.
-The allocation table is sized so that it has one cluster pointer per data-area cluster.
-This forms a linked list of clusters, so for any file or directory larger than one cluster,
-you consult that cluster's entry in the allocation table to find the next cluster.
-All files and directories are rounded up to the cluster size when they are stored.  The size of
-the cluster pointers depends on the total number of clusters in the filesystem, so for a total
-cluster count that fits in 12 bits you get FAT12, if it fits in 16 bits you get FAT16, and up
-to 28 bits uses FAT32.  This means that if you specifically need "FAT32" for interoperability
-resons (such as badly written BIOSes), there is a minimum filesystem size of ~32MB, because the
-selection of 12/16/32 is driven by the cluster count you specify in the header.
-
-You can now see why it isn't possible to begin writing clusters until the cluster count is
-known, because the first cluster will be located at the end of an array whose size is based on
-the total number of clusters, and the encoding of directories will depend on whether it is
-writing FAT12/16/32 directory entries which is also dependent on the total number of clusters.
-
-The "V" in VFAT refers to the long file name support that Microsoft added with Windows 95.
-The directory encoding for FAT only has 11 characters available for each file name.
-Rather than inventing a new directory entry encoding, they store longer file names in one or
-more hidden directory entries (each containing a fragment of the name) right before the visible
-one that actually references the file.  This is backward compatible, so it applies equally well
-to all the bit-widths.
-
-The newer exFAT format (not supported by this module) is a completely different format, more
-similar to modern filesystems which store variable-length directory entries and which describe
-file data locations with "extents" (offset and length) rather than an awkward linked list of
-cluster numbers.
+This was complicated enough it became its own module.  See L<Sys::Export::VFAT::Geometry>.
 
 =head2 Algorithm
 
-When you call L</finish>, this module will scan over all the files and directories you have
-added and total up the number of clusters required for each of the possible cluster sizes.
-Incidentally, directories are encoded in the same number of bytes across all 3 bit-widths,
-so this process also populates 'data' and 'size' of every directory node.
-It then selects the cluster size and cluster count that results in the smallest total size.
-Then it builds a flat array of files and directories to assign their start-cluster as it also
-builds the allocation table.  It then makes a second pass across all the files and directories
-to copy file data into the image and encode each directory now that the start-clusters are
-known.
+This module chooses the optimal cluster size and count for the files you provide.
+That choice affects the starting offset of the first cluster, so this module buffers all
+directories into memory until the decisions are made, and then writes the whole filesystem in
+one pass during L</finish>.
+
+The cluster size/count are chosen by scanning over all the files and directories you have added
+and total up the number of clusters required, under each of the possible cluster sizes.  It also
+adds in the size of the FAT, which is based on the cluster count.  It also calculates a complete
+assignment of files to clusters, to verify it can meet requests for device_offset or
+device_align.  It then selects whichever successful configuration had the smallest overall size.
+The calculated cluster assignment is then applied to the files and directory entries, and then
+the directories get encoded now that the cluster refs are resolved.  Finally, each component
+of the filesystem is written to the destination filename or filehandle.
 
 =constructor new
 
@@ -116,20 +107,12 @@ sub new($class, @attrs) {
             : isa_hash $attrs[0]? %{$attrs[0]}
             : isa_handle $attrs[0]? ( filehandle => $attrs[0] )
             : ( filename => $attrs[0] );
-   my $self= bless {
-      _root => {
-         mode => S_IFDIR,
-         uname => '',
-         FAT_shortname => '',
-         FAT_longname  => '',
-         FAT_is_auto_dir => 1,
-         FAT_cluster => [ undef ],
-      }
-   }, $class;
-   for (keys %attrs) {
-      $self->$_($attrs{$_});
-   }
-
+   my $self= bless {}, $class;
+   $self->{_root}= $self->_new_dir('(root)', undef);
+   # keep root dir separate from subdirs
+   delete $self->{_subdirs}{refaddr $self->{_root}};
+   # apply other attributes
+   $self->$_($attrs{$_}) for keys %attrs;
    $self;
 }
 
@@ -258,6 +241,294 @@ sub volume_label($self, @val) {
    $self->{volume_label}
 }
 
+# The smallest conceivable address where the data region could start
+sub _minimum_offset_to_data {
+   state $minimum_offset_to_data= Sys::Export::VFAT::Geometry->new(
+      bytes_per_sector => 512,
+      sectors_per_cluster => 1,
+      fat_count => 1,
+      root_dirent_count => 1,
+      cluster_count => 1
+   )->data_start_offset;
+}
+
+# clusterdata represents the data that needs to be written to a yet-to-be-determined
+# cluster chain.  Multiple dirents may refer to the same clusterdata, such as the ".."
+# and "." entries, or if hardlinks are enabled.
+sub _new_clusterdata($self, $name, $size, %fields) {
+   my $cdata= bless {
+      name => $name,
+      size => $size,
+      callbacks => [],
+   }, 'Sys::Export::VFAT::_ClusterData';
+   for (qw( align offset cluster data_ref data_path )) {
+      $cdata->{$_}= $fields{$_} if defined $fields{$_};
+   }
+   $cdata;
+}
+sub Sys::Export::VFAT::_ClusterData::name      { $_[0]{name} }
+sub Sys::Export::VFAT::_ClusterData::size      { $_[0]{size} }
+sub Sys::Export::VFAT::_ClusterData::data_ref  { $_[0]{data_ref} }
+sub Sys::Export::VFAT::_ClusterData::data_path { $_[0]{data_path} }
+sub Sys::Export::VFAT::_ClusterData::align     { $_[0]{align} }
+sub Sys::Export::VFAT::_ClusterData::offset    { $_[0]{offset} }
+sub Sys::Export::VFAT::_ClusterData::cluster   { $_[0]{cluster} }
+# register a callback to execute when the cluster becomes known
+sub Sys::Export::VFAT::_ClusterData::on_cluster_change($self, $cb) {
+   push $self->{callbacks}->@*, $cb;
+   $cb->($self, $self->{cluster}) if $self->{cluster};
+}
+# Record the file's cluster, and call any callbacks that were waiting on this
+sub Sys::Export::VFAT::_ClusterData::set_cluster($self, $cl_id) {
+   $self->{cluster}= $cl_id;
+   $_->($self, $cl_id) for $self->{callbacks}->@*;
+   $cl_id;
+}
+
+sub _new_dir($self, $name, $parent) {
+   my $dir= bless {
+      name => $name,
+      ent_by_fc => {},
+      is_root => !$parent,
+      clusterdata => $self->_new_clusterdata($name, undef),
+   }, 'Sys::Export::VFAT::_Directory';
+   $self->{_subdirs}{refaddr $dir}= $dir;
+   # VFAT holds strong reference to dirs, dir hold weak refs to other dirs
+   # Root dir does not get '.' and '..' entries, even on FAT32, but it does get a volume label
+   $dir->{ents}= [
+      $parent? (
+         $self->_new_dirent("$name/.",  0, long => undef, short11 => '.', dir => $dir),
+         $self->_new_dirent("$name/..", 0, long => undef, short11 => '..', dir => $parent)
+      ) : (
+         # content of volume label entry gets updated during ->finish
+         $self->_new_dirent("(volume label)", ATTR_VOLUME_ID, long => undef)
+      )
+   ];
+   $dir;
+}
+sub Sys::Export::VFAT::_Directory::name        { $_[0]{name} }
+sub Sys::Export::VFAT::_Directory::is_root     { $_[0]{is_root} }
+sub Sys::Export::VFAT::_Directory::ents        { $_[0]{ents} }
+sub Sys::Export::VFAT::_Directory::ent_by_fc   { $_[0]{ent_by_fc} }
+sub Sys::Export::VFAT::_Directory::clusterdata { $_[0]{clusterdata} }
+sub Sys::Export::VFAT::_Directory::child {
+   $_[0]{ent_by_fc}{fc $_[1]}
+}
+sub Sys::Export::VFAT::_Directory::add_ent($dir, $dirent) {
+   # Check collisions on both the long and short name
+   my ($long, $short)= ($dirent->long, $dirent->short);
+   my $long_conflict= defined $long && $dir->{ent_by_fc}{fc $long};
+   my $short_conflict= defined $short && $dir->{ent_by_fc}{fc $short};
+   if ($long_conflict || $short_conflict) {
+      # If the user is writing a directory and the thing in the way is an auto-dir,
+      # replace the entry with the new attributes.
+      if ($long_conflict && (!$short_conflict || $short_conflict == $long_conflict)
+         && $long_conflict->is_dir && $long_conflict->autovivified
+         && $dirent->is_dir
+      ) {
+         weaken($dirent->{dir}= $long_conflict->{dir});
+         $dirent->{clusterdata}= $long_conflict->{clusterdata};
+      }
+      else {
+         croak "Path ".$dirent->name." already exists"
+            if $long_conflict;
+         croak "Path ".$dirent->name." short name ".$dirent->short." conflicts with "
+            . $short_conflict->name;
+      }
+   }
+   $dir->{ent_by_fc}{fc $long}= $dirent if length $long;
+   $dir->{ent_by_fc}{fc $short}= $dirent if length $short;
+   push $dir->{ents}->@*, $dirent;
+   $dirent;
+}
+# This assigns a valid 8.3 filename which doesn't conflict with any of the other ents
+sub Sys::Export::VFAT::_Directory::_build_shortname($dir, $ent) {
+   my $name= $ent->long;
+   my $ent_by_fc= $dir->ent_by_fc;
+   length $name or die "BUG";
+   $name= uc $name;
+   my $ext_pos= rindex($name, '.');
+   my $base= $ext_pos < 0? $name : substr($name, 0, $ext_pos);
+   my $ext=  $ext_pos < 0? ''    : substr($name, $ext_pos+1);
+   for ($base, $ext) {
+      # Replace every run of invalid chars with a single '_'
+      s/[^\x21\x23-\x29\x2D.\x30-\x39\x40-\x5A\x5E-\x7B\x7D-\xE4\xE6-\xFF]+/_/g;
+      # Now that all high characters have been removed, consider these to be bytes
+      utf8::downgrade($_);
+   }
+   $ext= '.'.substr($ext,0,3) if length $ext;
+   my ($iter, $iter_len, $base_len)= (0,0, length $base);
+   if (!$base_len || $base_len > 8) {
+      substr($base, min($base_len,6), $base_len, '~1');
+      ($iter, $iter_len)= (1, 2);
+   }
+   while ($ent_by_fc->{fc $base.$ext}) {
+      my $next_iter_len= 1 + length ++$iter;
+      my $iter_pos= min($base_len, 8 - $next_iter_len);
+      croak "Can't find available ~N suffix for '$name'"
+         if $iter_pos < 0;
+      substr($base, $iter_pos, $next_iter_len, '~'.$iter);
+      $iter_len= $next_iter_len;
+   }
+   $ent_by_fc->{fc $base.$ext}= $ent;
+   $ent->{short}= $base.$ext;
+}
+
+sub Sys::Export::VFAT::_Directory::calc_size($dir) {
+   # Sort the dirents but keep '.' and '..' and volume label at the start
+   my $ents= $dir->{ents};
+   my @head= splice(@$ents, 0, $dir->is_root? 1 : 2);
+   @$ents= sort { fc $a->long cmp fc $b->long } @$ents;
+   splice(@$ents, 0, 0, @head);
+   # Need the 8.3 name in order to know whether it matches the long name
+   my $n= @$ents;
+   for (@$ents) {
+      unless (length $_->short11) {
+         $dir->_build_shortname($_) if !defined $_->short;
+         my ($name, $ext)= split /\./, $_->short;
+         $_->{short11}= pack 'A8 A3', $name, ($ext//'');
+      }
+      # Add LFN entries
+      if (defined $_->long && $_->long ne $_->short) {
+         my $utf16= encode('UTF-16LE', $_->long, Encode::FB_CROAK|Encode::LEAVE_SRC);
+         $n += ceil(length($utf16) / 26);
+      }
+   }
+   $log->debugf("dir /%s has %d real entries, %d LFN entries, size=%d ents=%s",
+      $dir->name, scalar(@$ents), $n-scalar @$ents, $n*32,
+      [ map [ $_->long, $_->short ], @$ents ] )
+      if $log->is_debug;
+   croak "Directory /".$dir->name." exceeds maximum entry count ($n >= 65536)"
+      if $n >= 65536;
+   $dir->clusterdata->{size}= $n * 32;  # always 32 bytes per dirent
+}
+
+# Called on every directory Allocation, this packs ->{data_dirents} into ->{data}
+sub Sys::Export::VFAT::_Directory::pack($dir) {
+   my $data= '';
+   for my $ent ($dir->ents->@*) {
+      $log->tracef("encoding dirent short=%-12s long=%s cluster=%s",
+         $ent->short, $ent->long, $ent->cluster);
+
+      my $short11= $ent->short11 // die "BUG: short11 not set";
+      $short11 =~ s/^\xE5/\x05/; # \xE5 may occur in some charsets, and needs escaped
+
+      # Need Long-File-Name entries?
+      my $long= $ent->long;
+      if (defined $long && $long ne $ent->short) {
+         # Checksum for directory shortname, used to verify long name parts
+         my $cksum= 0;
+         $cksum= ((($cksum >> 1) | ($cksum << 7)) + $_) & 0xFF
+            for unpack 'C*', $short11;
+         # Each dirent holds up to 26 bytes (13 chars) of the long name
+         my @chars= unpack 'v*', encode('UTF-16LE', $long, Encode::FB_CROAK|Encode::LEAVE_SRC);
+         # short final chunk is padded with \0\uFFFF*
+         if (my $remainder= @chars % 13) {
+            push @chars, 0;
+            push @chars, (0xFFFF)x(12 - $remainder);
+         }
+         my $last= ceil(@chars/13) - 1;
+         for my $i (reverse 0..$last) {
+            my $ofs= $i*13;
+            my $seq= ($i + 1) | (($i == $last) ? 0x40 : 0x00);
+            $data .= pack('C v5 C C C v6 v v2',
+               $seq,                      # sequence and end-flag
+               @chars[$ofs .. $ofs+4],    # first 5 chars
+               0x0F, 0x00, $cksum,        # attr = LFN, type = 0
+               @chars[$ofs+5 .. $ofs+10], # next 6 chars
+               0,                         # no cluster number
+               @chars[$ofs+11 .. $ofs+12] # last 2 chars
+            );
+         }
+      }
+
+      my $mtime= $ent->mtime // time;
+      my ($wdate, $wtime)             = _epoch_to_fat_date_time($mtime);
+      my ($cdate, $ctime, $ctime_frac)= _epoch_to_fat_date_time($ent->btime // $mtime);
+      my ($adate)                     = _epoch_to_fat_date_time($ent->atime // $mtime);
+      # References to the root dir are always encoded as cluster zero, even on FAT32
+      # where the root dir actually lives at a nonzero cluster.
+      # Volume label also doesn't need a cluster id.  Nor do empty files.
+      my $cluster= 0;
+      my $clusterdata= $ent->clusterdata;
+      if ($clusterdata && !($ent->dir && $ent->dir->is_root)) {
+         $cluster= $clusterdata->cluster;
+         unless (defined $cluster) {
+            $cluster= 0;
+            # If we need to encode a cluster which isn't known, append a function to the
+            # allocation which can later be called when the cluster is known, to repack
+            # the directory entry.
+            my $name= $ent->name;
+            $log->tracef("temporarily encoding dirent %s cluster as 0 to be patched later", $name);
+            my $ent_ofs= length($data);
+            $clusterdata->on_cluster_change(sub ($cldat, $cl_id) {
+               $log->tracef("patching %s with cluster id %s", $name, $cl_id);
+               substr($data, $ent_ofs+20, 2, pack 'v', ($cl_id>>16));
+               substr($data, $ent_ofs+26, 2, pack 'v', $cl_id);
+            });
+         }
+      }
+      # Directories always written as size = 0
+      my $size= $ent->is_dir? 0 : $clusterdata? $clusterdata->size : 0;
+      $log->tracef(" with encoded size=%d cluster=%d", $size, $cluster);
+      $data .= pack('A11 C C C v v v v v v v V',
+         $short11, $ent->attrs, 0, #NT_reserved
+         $ctime_frac, $ctime, $cdate, $adate,
+         $cluster >> 16, $wtime, $wdate, $cluster, $size);
+   }
+   die "BUG: calculated dir size ".$dir->clusterdata->size." != data length ".length($data)
+      unless $dir->clusterdata->size == length $data;
+   # Dir must be padded to length of sector/cluster with entries whose name begins with \x00
+   # but that will happen automatically later as the data is appended to the file.
+   $dir->clusterdata->{data_ref}= \$data;
+}
+
+sub _new_dirent($self, $name, $attrs, %fields) {
+   my $long= exists $fields{long}? $fields{long} : ($name =~ m{([^/]+)\z})[0];
+   my $short= $fields{short};
+   if (defined $short) {
+      croak "Invalid short name '$short'" unless is_valid_shortname($short);
+   } else {
+      $short //= $long if defined $long && is_valid_shortname($long);
+   }
+   utf8::downgrade($short) if defined $short; # verified to be just bytes
+   # short11 is used internally and was already vetted
+   my $short11= $fields{short11};
+   $attrs |= ATTR_DIRECTORY if defined $fields{dir};
+   my $ent= bless {
+      name    => $name,
+      long    => $long,
+      short   => $short,
+      short11 => $short11,
+      attrs   => $attrs,
+   }, 'Sys::Export::VFAT::_DirEnt';
+   for (qw( atime mtime btime autovivified clusterdata )) {
+      $ent->{$_}= $fields{$_} if defined $fields{$_};
+   }
+   $ent->dir($fields{dir}) if defined $fields{dir};
+   return $ent;
+}
+sub Sys::Export::VFAT::_DirEnt::name        { $_[0]{name} }
+sub Sys::Export::VFAT::_DirEnt::long        { $_[0]{long} }
+sub Sys::Export::VFAT::_DirEnt::short       { $_[0]{short} }
+sub Sys::Export::VFAT::_DirEnt::short11     { $_[0]{short11} }
+sub Sys::Export::VFAT::_DirEnt::attrs       { $_[0]{attrs} }
+sub Sys::Export::VFAT::_DirEnt::is_dir      { $_[0]{attrs} & ATTR_DIRECTORY }
+sub Sys::Export::VFAT::_DirEnt::atime       { $_[0]{atime} }
+sub Sys::Export::VFAT::_DirEnt::mtime       { $_[0]{mtime} }
+sub Sys::Export::VFAT::_DirEnt::btime       { $_[0]{btime} }
+sub Sys::Export::VFAT::_DirEnt::clusterdata { $_[0]{clusterdata} }
+sub Sys::Export::VFAT::_DirEnt::cluster     { $_[0]{clusterdata} && $_[0]{clusterdata}->cluster }
+sub Sys::Export::VFAT::_DirEnt::autovivified{ $_[0]{autovivified} }
+sub Sys::Export::VFAT::_DirEnt::dir {
+   if (@_ > 1) {
+      # entries have weak references to directories, the VFAT holds the strong ref
+      weaken($_[0]{dir}= $_[1]);
+      $_[0]{clusterdata}= $_[1]->clusterdata;
+   }
+   $_[0]{dir}
+}
+
 =method add
 
   $fat->add(\%file_attrs);
@@ -272,7 +543,7 @@ sub volume_label($self, @val) {
   #   mtime              => $unix_epoch,
   #   btime              => $unix_epoch,
   #   size               => $data_size,
-  #   data               => $literal_data,
+  #   data               => $literal_data_or_scalarref,
   #   data_path          => $abs_path_to_data,
   #   device_offset      => $desired_byte_offset,
   #   device_align       => $desired_byte_alignment_pow2,
@@ -325,100 +596,125 @@ is a multiple of a power-of-2 from the start of the device but not from the star
 sub add($self, $file) {
    $file= { expand_stat_shorthand($file) }
       if isa_array $file;
+
    defined $file->{uname} or defined $file->{name}
       or croak "Require 'uname' or 'name'";
    defined $file->{mode} or croak "Require 'mode'";
+
    # If user supplied FAT_utf16_name, use that as a more official source of Unicode
-   my $uname= $file->{uname} // decode('UTF-8', $file->{name}, Encode::FB_CROAK);
-   $uname =~ s,^/,,; # remove leading slash
-   my @path= grep length, split '/', $uname;
+   my $path= $file->{uname} // decode('UTF-8', $file->{name}, Encode::FB_CROAK | Encode::LEAVE_SRC);
+   $path =~ s,^/,,; # remove leading slash, if any
+
+   # Validate path components
+   my @path= grep length, split '/', $path;
    is_valid_longname($_) || croak "Not a valid VFAT filename: '$_'"
       for @path;
    my $leaf= pop @path;
-   # Walk through the tree based on the case-folded path
-   my $dir= $self->{_root};
-   my $dir_uname;
-   for (@path) {
-      defined $dir_uname? ($dir_uname .= "/$_") : ($dir_uname= $_);
-      my $existing= $dir->{FAT_by_fc_name}{fc $_}
-         # auto-create directory
-         //= { uname => $dir_uname, mode => S_IFDIR, FAT_longname => $_, FAT_is_auto_dir => 1 };
-      S_ISDIR($dir->{mode}) or croak "'$_' is not a directory, while attempting to add '$uname'";
-      $dir= $existing;
-   }
-   # Check collision on case-insensitive name.  '$leaf' is unicode.
-   my $by_fc= $dir->{FAT_by_fc_name} //= {};
-   my $ent= $by_fc->{fc $leaf};
-   if ($ent) {
-      # If the user is writing a directory and the thing in the way is an auto-dir,
-      # replace the entry with the new attributes.
-      if (S_ISDIR($file->{mode}) && $ent->{FAT_is_auto_dir}) {
-         delete $ent->{FAT_is_auto_dir};
-         $ent->{$_}= $file->{$_} for keys %$file;
+
+   # did user supply FAT attribute bitmask?
+   my $attrs= $file->{FAT_attrs} // do {
+      # readonly determined by user -write bit of 'mode'
+      (!($file->{mode} & 0400)? ATTR_READONLY : 0)
+      # hidden determined by leading '.' in filename
+      | (defined $leaf && $leaf =~ /^\./? ATTR_HIDDEN : 0)
+   };
+   my $clusterdata;
+   if (S_ISREG($file->{mode})) {
+      my ($size, $offset, $align, $data_path)
+         = @{$file}{qw( size device_offset device_align data_path )};
+      my $data_ref;
+      # data can be supplied literally in ->{data} or by ->{data_path}
+      if (defined $file->{data}) {
+         $data_ref= ref $file->{data} eq 'SCALAR'? $file->{data} : \$file->{data};
+         # Die on encoding mistakes
+         if (utf8::is_utf8($$data_ref)) {
+            my $x= $$data_ref;
+            croak "->{data} must be 8-bit, but encountered wide character at $path"
+               unless utf8::downgrade($x, 1);
+            $data_ref= \$x;
+         }
+         $size //= length($$data_ref);
+      } elsif (defined $data_path) {
+         croak "Data file '$data_path' does not exist, for '$path'"
+            unless -e $data_path;
+         croak "Data file '$data_path' is not readable, for '$path'"
+            unless -r $data_path;
+         $size= -s $data_path;
       }
       else {
-         croak "Path '$uname' already exists";
+         croak "File $path has size=$size but lacks 'data' or 'data_path' attributes";
       }
+      # must be a power of 2
+      croak "Invalid device_align $align for '$path', must be a power of 2"
+         if defined $align && !isa_pow2 $align;
+      my $offset_out;
+      # Sanity check device_offset before we get too far along
+      if (defined $offset) {
+         $align //= 512;
+         # Could be a scalar ref, for output
+         if (ref $offset eq 'SCALAR') {
+            $offset_out= $offset;
+            $offset= undef;
+         } else {
+            # must fall in the data area
+            $offset > $self->volume_offset + _minimum_offset_to_data
+            # must be a multiple of at least 512 (probably more)
+            && !($offset & ($align-1))
+               or croak "Invalid device_offset '$offset' for file '$path'";
+         }
+      }
+      $clusterdata= $self->_new_clusterdata($path, $size,
+         align => $align, offset => $offset,
+         data_ref => $data_ref, data_path => $data_path,
+      );
+      # If user requested to find out the extent this file landed at,
+      # set up a callback to record that.
+      if ($offset_out) {
+         weaken(my $self2= $self);
+         $clusterdata->on_cluster_change(
+            sub($cldat, $cl_id) {
+               $$offset_out= $cl_id < 2? undef # 0 and 1 are not real clusters
+                  : $self2->geometry->get_cluster_device_offset($cl_id);
+            }
+         )
+      }
+   } elsif (S_ISDIR($file->{mode})) {
+      $attrs |= ATTR_DIRECTORY;
    }
    else {
-      $ent= { %$file };
+      # TODO: add conditional symlink support via hardlinks
+      croak "Can only export files or directories into VFAT"
    }
-   $ent->{uname}= $uname; # store unicode for later reporting
-   delete $ent->{name};
-   # Validate FAT_shortname
-   if (length $ent->{FAT_shortname}) {
-      is_valid_shortname($ent->{FAT_shortname})
-         or croak "Invalid FAT_shortname '$ent->{FAT_shortname}' for '$uname'";
-   }
-   # If the normal name is also a valid shortname, assign that
-   elsif (is_valid_shortname($leaf)) {
-      $ent->{FAT_shortname}= $leaf;
-   }
-   # Check for collision on the FAT_shortname if known
-   if (length $ent->{FAT_shortname}) {
-      utf8::downgrade($ent->{FAT_shortname}); # verified to be just bytes
-      defined $by_fc->{fc $ent->{FAT_shortname}}
-         and croak "Duplicate shortname '$ent->{FAT_shortname}' at '$uname'";
-      $by_fc->{fc $ent->{FAT_shortname}}= $ent;
-   }
-   $by_fc->{fc $leaf}= $ent;
-   $ent->{FAT_longname}= $leaf;
 
-   # Sanity check device_offset before we get too far along
-   if (defined $ent->{device_offset}) {
-      # The smallest conceivable address where the data region could start
-      state $minimum_offset_to_data= Sys::Export::VFAT::Geometry->new(
-            bytes_per_sector => 512,
-            sectors_per_cluster => 1,
-            fat_count => 1,
-            root_dirent_count => 1,
-            cluster_count => 1
-         )->data_start_offset;
+   # Walk through the tree based on the case-folded path
+   my $dir= $self->{_root};
+   for (@path) {
+      my $ent= $dir->child($_);
+      if ($ent) {
+         croak $ent->name." is not a directory, while attempting to add '$path'"
+            unless $ent->is_dir;
+      } else { # auto-create directory
+         $ent= $dir->add_ent($self->_new_dirent($dir->name."/$_", ATTR_DIRECTORY,
+            autovivified => 1,
+            dir => $self->_new_dir($ent->name, $dir)
+         ));
+      }
+      $dir= $ent->dir;
+   }
+   # Add the new entry to this dir - croaks on name collision
+   my $ent= $dir->add_ent($self->_new_dirent($path, $attrs, clusterdata => $clusterdata,
+      $file->%{qw( atime mtime btime )},
+      (length $file->{FAT_shortname}? (short => $file->{FAT_shortname}) : ())
+   ));
+   # initialize after add_ent in case the new dirent inherited an autovivified dir
+   $ent->dir($self->_new_dir($path, $dir))
+      if $ent->is_dir && !$ent->dir;
 
-      # Can be a scalar ref, for output:
-      if (ref $ent->{device_offset} eq 'SCALAR') {
-         my $offset_ref= delete $ent->{device_offset};
-         my $callback= sub($self2, $cl_id, $file) {
-            $$offset_ref= $cl_id < 2? undef : $self2->geometry->get_cluster_device_offset($cl_id);
-         };
-         $ent->{FAT_cluster}= [ undef, $callback ];
-         $ent->{device_align} //= 512; # mark file as needing to be a single extent
-      }
-      else {
-         # must fall in the data area
-         $ent->{device_offset} > $minimum_offset_to_data + $self->volume_offset
-         # must be a multiple of at least 512 (probably more)
-         && !($ent->{device_offset} & 511)
-            or croak "Invalid device_offset '$ent->{device_offset}' for file '$uname'";
-      }
-   }
-   if (defined $ent->{device_align}) {
-      # must be a power of 2
-      isa_pow2 $ent->{device_align}
-         or croak "Invalid device_align $ent->{device_align} for '$uname', must be a power of 2";
-   }
-   $log->debugf("added %s longname=%s shortname=%s device_align=0x%X device_offset=0x%X size=0x%X",
-      @{$ent}{qw( uname FAT_longname FAT_shortname device_align device_offset size )})
+   $log->debugf("added %s longname=%s shortname=%s %s",
+      $ent->name, $ent->long, $ent->short, $ent->is_dir? 'DIR'
+      : $ent->clusterdata? sprintf("size=0x%X device_align=0x%X device_offset=0x%X",
+         $ent->clusterdata->size, $ent->clusterdata->align, $ent->clusterdata->offset)
+      : 'size=0 (empty file)' )
       if $log->is_debug;
    $self;
 }
@@ -434,28 +730,24 @@ You may get exceptions during this call if there isn't a way to write your files
 =cut
 
 sub finish($self) {
-   # Build a list of all directories and files
    my $root= $self->{_root};
-   $log->tracef("finalize root %s", $root);
-   # sanity check, since this acts as an important flag
-   $root->{FAT_longname} eq '' && $root->{FAT_shortname} eq ''
-      or croak "Root dir has wrong name";
-   # Find out the size of every directory
-   $self->_finalize_dir($root, undef, \my @dirs, \my @files);
+   # Find out the size of every directory, and build ->{_allocs}, ->{_dir_allocs} and ->{_special_allocs}
+   $root->ents->[0]{short11}= $self->volume_label // 'NO NAME    ';
+   $_->calc_size for $root, values $self->{_subdirs}->%*;
    # calculate what geometry gives us the best size, when rounding each file to that cluster
    # size vs. the size of the FAT it generates
-   my ($geom, $alloc, $cluster_assignment)= $self->_optimize_geometry(\@dirs, \@files)
+   my ($geom, $alloc)= $self->_optimize_geometry
       or croak join("\n", "No geometry options can meet your device_offset / device_align requests:",
             map "$_: $self->{_optimize_geometry_fail_reason}{$_}",
                sort { $a <=> $b } keys $self->{_optimize_geometry_fail_reason}->%*
          );
    $self->{geometry}= $geom;
    $self->{allocation_table}= $alloc;
-   # Apply file cluster IDs to the file->{FAT_cluster} attributes
-   $self->_resolve_cluster($_->[1], $_->[0])
-      for values %$cluster_assignment;
-   # Pack directories now that file clusters are known
-   $self->_pack_dir($_) for reverse(@dirs), $root;
+   # Apply file cluster IDs to the ClusterData objects
+   $_->{clusterdata}->set_cluster($_->{invlist}[0])
+      for values $alloc->chains->%*;
+   # Pack directories now that all file cluster ids are known
+   $_->pack for $root, values $self->{_subdirs}->%*;
 
    my $fh= $self->filehandle;
    if (!$fh) {
@@ -469,7 +761,7 @@ sub finish($self) {
       truncate($fh, $geom->volume_offset + $geom->total_size)
          or croak "truncate: $!";
    }
-   $self->_write_filesystem($fh, $geom, $alloc, [ @files, @dirs ]);
+   $self->_write_filesystem($fh, $geom, $alloc);
    unless ($self->filehandle) {
       $fh->close or croak "close: $!";
    }
@@ -481,72 +773,72 @@ sub _log_hexdump($buf) {
       for 0..ceil(length($buf) / 16);
 }
 
-sub _write_block_at {
-   my ($fh, $addr, undef, $ofs, $size, $descrip)= @_;
+sub _write_block_at($fh, $addr, $data_ref, $ofs, $size, $descrip=undef) {
    $log->tracef("write %s at 0x%X-0x%X from buf size 0x%X%s",
-      $descrip//'blocks', $addr, $addr+$size, length($_[2]), $ofs? sprintf(" ofs 0x%X", $ofs) : ''
+      $descrip//'blocks', $addr, $addr+$size, length($$data_ref), $ofs? sprintf(" ofs 0x%X", $ofs) : ''
       ) if $log->is_trace;
    sysseek($fh, $addr, SEEK_SET) or croak "sysseek($addr): $!";
    $ofs //= 0;
-   my $avail= length($_[2]) - $ofs;
+   my $avail= length($$data_ref) - $ofs;
    $size //= $avail;
    # always write full size, padding with zeroes
    if ($avail < $size) {
-      splice(@_, 2, 1, $_[2].("\0"x($size-$avail)));
+      my $data= $avail > 0? substr($$data_ref, $ofs) : '';
+      $data .= "\0" x ($size-length($data));
+      $data_ref= \$data;
    }
-   my $wrote= syswrite($fh, $_[2], $size, $ofs);
+   my $wrote= syswrite($fh, $$data_ref, $size, $ofs);
    croak "syswrite: $!" if !defined $wrote;
    croak "Unexpected short write ($wrote != $size)" if $wrote != $size;
    return 1;
 }   
 
-# Given an inversion list describing the allocated clusters for this file,
-# write the relevant chunks of the file to those cluster data areas.
-sub _write_clusters {
-   my ($fh, $geom, $alloc_invlist)= (shift, shift, shift);
-   my $data_ofs= 0;
-   for (my $i= 0; $i < @$alloc_invlist && $data_ofs < length($_[0]); $i += 2) {
-      my ($cl_start, $cl_lim)= @{$alloc_invlist}[$i, $i+1];
-      my $size= ($cl_lim-$cl_start) * $geom->bytes_per_cluster;
-      _write_block_at($fh, $geom->get_cluster_device_offset($cl_start), $_[0], $data_ofs, $size);
-      $data_ofs += $size;
-   }
-}
-
 # This function depends on the file being pre-zeroed, which happens automatially for an empty
 # file that has just had its length changed by truncate().  This would write an invalid
 # filesystem if the handle is a block device with random leftover data in it.
-sub _write_filesystem($self, $fh, $geom, $alloc, $files) {
+sub _write_filesystem($self, $fh, $geom, $alloc) {
    ($alloc->max_cluster_id//-1) == ($geom->max_cluster_id//-1)
       or croak "Max element of 'fat_entries' should be ".$geom->max_cluster_id.", but was ".$alloc->max_cluster_id;
    # Pack the boot sector and other reserved sectors
    my $buf= $self->_pack_reserved_sectors;
    my $ofs= $self->volume_offset;
-   _write_block_at($fh, $ofs, $buf, 0, $geom->reserved_size, 'reserved sectors');
+   _write_block_at($fh, $ofs, \$buf, 0, $geom->reserved_size, 'reserved sectors');
    $ofs += $geom->reserved_size;
    # Pack the allocation tables
    $buf= $alloc->pack;
    # store a copy of this into each of the regions occupied by fats
    for (my $i= 0; $i < $geom->fat_count; $i++) {
-      _write_block_at($fh, $ofs, $buf, 0, $geom->fat_size, "fat table $i");
+      _write_block_at($fh, $ofs, \$buf, 0, $geom->fat_size, "fat table $i");
       $ofs += $geom->fat_size;
    }
    # For FAT12/FAT16, write the root directory entries
    if ($geom->bits < FAT32) {
-      my $root= $self->{_root};
+      my $root_cldata= $self->{_root}->clusterdata;
       die "BUG: mis-sized FAT16 root directory"
-         if !$root->{size} || ($root->{size} & 31) || length $root->{data} != $root->{size}
-            || $root->{size} > $geom->root_dir_size;
-      _write_block_at($fh, $ofs, $root->{data}, 0, $geom->root_dir_size, 'root dir');
+         if !$root_cldata->size || ($root_cldata->size & 31)
+            || length ${$root_cldata->data_ref} != $root_cldata->size
+            || $root_cldata->size > $geom->root_dir_size;
+      _write_block_at($fh, $ofs, $root_cldata->data_ref, 0, $geom->root_dir_size, 'root dir');
    }
    # The files and dirs have all been assigned clusters by _optimize_geometry
-   for my $f (@$files) {
-      next unless $f->{size};
-      my $cl= $f->{FAT_cluster}[0] or die "BUG: no cluster assigned";
-      my $chain= $alloc->get_chain($cl) or die "BUG: no chain at $cl";
-      $log->debug("writing '/$f->{uname}' at cluster "._render_invlist($chain->{invlist}))
+   for my $cl (sort { $a <=> $b } keys $alloc->chains->%*) {
+      my ($invlist, $cldata)= $alloc->chains->{$cl}->@{'invlist','clusterdata'};
+      my $data_ref= $cldata->data_ref;
+      if (!defined $data_ref && defined $cldata->data_path) {
+         slurp_file(my $data, $cldata->data_path);
+         $data_ref= $data;
+      }
+      # Given an inversion list describing the allocated clusters for this file,
+      # write the relevant chunks of the file to those cluster data areas.
+      $log->debugf("writing '/%s' at cluster %s", $cldata->name, _render_invlist($invlist))
          if $log->is_debug;
-      _write_clusters($fh, $geom, $chain->{invlist}, $f->{data});
+      my $data_ofs= 0;
+      for (my $i= 0; $i < @$invlist; $i += 2) {
+         my ($cl_start, $cl_lim)= @{$invlist}[$i, $i+1];
+         my $size= ($cl_lim-$cl_start) * $geom->bytes_per_cluster;
+         _write_block_at($fh, $geom->get_cluster_device_offset($cl_start), $data_ref, $data_ofs, $size);
+         $data_ofs += $size;
+      }
    }
 }
 sub _render_invlist($il) {
@@ -555,18 +847,24 @@ sub _render_invlist($il) {
       0 .. int($#$il/2)
 }
 
-# Record the file's cluster, and call any callbacks that were waiting on this
-sub _resolve_cluster($self, $f, $cl_id) {
-   my $cluster_ref= ref $f eq 'HASH'? $f->{FAT_cluster} : $f;
-   $cluster_ref->[0]= $cl_id;
-   $_->($self, $cl_id, $f) for @{$cluster_ref}[1..$#$cluster_ref];
-}
-
 =export is_valid_longname
+
+  $bool= is_valid_longname($name)
+
+C<$name> should be a unicode string
 
 =export is_valid_shortname
 
+  $bool= is_valid_shortname($name)
+
+C<$name> should be encoded as platform-native bytes, with no codepoints above 0xFF.
+Allows space characters in the name, even though most DOS tools can't handle that.
+
 =export is_valid_volume_label
+
+  $bool= is_valid_volume_label($name)
+
+C<$name> should be encoded as platform-native bytes, with no codepoints above 0xFF.
 
 =cut
 
@@ -575,150 +873,51 @@ sub is_valid_longname {
    # characters permitted for LFN are all letters numbers and $%'-_@~`!(){}^#&+,;=[].
    # and space and all codepoints above 0x7F.
    # they may not begin with space, and cannot exceed 255 chars.
-   $_[0] !~ /^(\.+\.?)\z/ # dot and dotdot are reserved
+   !!($_[0] !~ /^(\.+\.?)\z/ # dot and dotdot are reserved
    && $_[0] =~ /^
       [\x21\x23-\x29\x2B-\x2E\x30-\x39\x3B\x3D\x40-\x5B\x5D-\x7B\x7D-\xE4\xE6-]
       [\x20\x21\x23-\x29\x2B-\x2E\x30-\x39\x3B\x3D\x40-\x5B\x5D-\x7B\x7D-\xE4\xE6-]{0,254}
-      \z/x;
+      \z/x);
 }
 
 sub is_valid_shortname {
    shift if @_ > 1 && "$_[0]"->isa(__PACKAGE__);
-   $_[0] eq uc $_[0]
+   !!($_[0] eq uc $_[0]
    && $_[0] =~ /^
       [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]{1,8}
+      [\x20\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]{0,7}
       ( \. [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]{0,3} )
-      \z/x;
+      \z/x);
 }
 
 sub is_valid_volume_label {
    shift if @_ > 1 && "$_[0]"->isa(__PACKAGE__);
    # same as shortname but no '.' and space is allowed
-   $_[0] =~ /^
+   !!($_[0] =~ /^
       [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]
       [\x20\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]{0,10}
-      \z/x;
+      \z/x);
 }
 
-# This builds:
-#  FAT_cluster
-#  FAT_dirents (does not include LFN dirents, does include '.', '..', volume label)
-#  size        (number of dirents + LFN, times 32 bytes)
-#  for each entry:
-#    ->{FAT_short11}
-#    ->{size}
-# and populates @$dirlist and @$filelist
-sub _finalize_dir($self, $dir, $parent, $dirlist, $filelist) {
-   # cluster refs get shared between nodes so that nodes don't need a ->{parent} weak ref
-   # when the cluster finally gets set and needs encoded into the parent.
-   $dir->{FAT_cluster} //= [ undef ];
-   my @ents= values %{$dir->{FAT_by_fc_name} // {}};
-   my @dirs;
-   # Need the 8.3 name in order to know whether it matches the long name
-   for (@ents) {
-      unless (length $_->{FAT_short11}) {
-         # Is the 8.3 name decided already?
-         $_->{FAT_shortname} //= _coerce_to_83_name($_->{FAT_longname}, $dir->{FAT_by_shortname});
-         $dir->{FAT_by_shortname}{$_->{FAT_shortname}}= $_;
-         my ($name, $ext)= split /\./, $_->{FAT_shortname};
-         $_->{FAT_short11}= pack 'A8 A3', $name, ($ext//'');
-      }
-      # Check file type
-      if (S_ISDIR($_->{mode})) {
-         push @dirs, $_;
-      }
-      elsif (S_ISREG($_->{mode})) {
-         push @$filelist, $_;
-         unless (defined $_->{size}) { # ensure size is initialized
-            if (defined $_->{data}) {
-               # Die on encoding mistakes
-               !utf8::is_utf8($_->{data}) or utf8::downgrade($_->{data}, 1)
-                  or croak "->{data} must be 8-bit, but encountered wide character at $_->{uname}";
-               $_->{size}= length $_->{data};
-            }
-            elsif (defined $_->{data_path}) {
-               $_->{size}= -s $_->{data_path} // croak "Can't read data_path=$_->{data_path} of $_->{uname}";
-            }
-            else {
-               carp "File $_->{uname} has neither 'size' nor 'data' attributes";
-               $_->{data}= '';
-               $_->{size}= 0;
-            }
-         }
-         # empty files get assigned cluster 0
-         if (!$_->{size}) {
-            $_->{FAT_cluster}[0]= 0;
-            $self->_resolve_cluster($_, 0) if $_->{FAT_cluster}->@* > 1;
-         }
-      }
-      else {
-         # TODO: add conditional symlink support via hardlinks
-         croak "Unsupported directory entry type at $_->{uname}";
-      }
-   }
-   # Sort into a stable order.
-   @ents= sort { $a->{FAT_longname} cmp $b->{FAT_longname} } @ents;
-   $dir->{FAT_attrs}= $self->_calc_FAT_attrs($dir);
-   # Inject '.' and '..' entries, unless it is the root dir.
-   if ($parent) {
-      unshift @ents, {
-         uname => "$dir->{uname}/.",
-         mode => S_IFDIR,
-         FAT_short11 => '.',
-         FAT_cluster => $dir->{FAT_cluster},
-      }, {
-         uname => "$dir->{uname}/..",
-         mode => S_IFDIR,
-         FAT_short11 => '..',
-         FAT_cluster => $parent->{FAT_cluster},
-      };
-   }
-   else {
-      # At the root, inject the volume label.
-      my $label= $self->volume_label // 'NO NAME';
-      croak "Invalid volume label '$label'"
-         unless is_valid_volume_label($label);
-      unshift @ents, {
-         uname => "(volume label)",
-         mode => 0,
-         FAT_short11 => $label,
-         FAT_attrs => ATTR_VOLUME_ID,
-         FAT_cluster => [ 0 ],
-      };
-   }
-   $dir->{FAT_dirents}= \@ents;
-   my $n= @ents;
-   # Add LFN entries
-   for (@ents) {
-      if (defined $_->{FAT_longname} && $_->{FAT_longname} ne $_->{FAT_shortname}) {
-         my $utf16= encode('UTF-16LE', $_->{FAT_longname}, Encode::FB_CROAK|Encode::LEAVE_SRC);
-         $n += ceil(length($utf16) / 26);
-      }
-   }
-   $log->debugf("dir /%s has %d real entries, %d LFN entries, size=%d ents=%s",
-      $dir->{uname}, scalar(@ents), $n-scalar @ents, $n*32,
-      [ map [ $_->{FAT_longname}, $_->{FAT_shortname} ], @ents ] )
-      if $log->is_debug;
-   croak "Directory /$dir->{uname} exceeds maximum entry count ($n >= 65536)"
-      if $n >= 65536;
-   $dir->{size}= $n * 32;  # always 32 bytes per dirent
-   # recursively finalize all subdirectories
-   push @$dirlist, @dirs;
-   $self->_finalize_dir($_, $dir, $dirlist, $filelist) for @dirs;
-}
-
-sub _optimize_geometry($self, $dirs, $files) {
+sub _optimize_geometry($self) {
    # calculate what geometry gives us the best size, when rounding each file to that cluster
    # size vs. the size of the FAT it generates, and also meting the needs of alignment requests
-   my (@offset_files, @aligned_files, @other_files);
-   push @{$_->{device_offset}? \@offset_files : $_->{device_align}? \@aligned_files : \@other_files}, $_
-      for grep $_->{size}, @$files;
-   $log->debugf("_optimize_geometry offset_files=%d aligned_files=%d other_files=%d",
-      scalar @offset_files, scalar @aligned_files, scalar @other_files);
-   my $min_ofs= min(map $_->{device_offset}, @offset_files);
-   my $max_ofs= max(map $_->{device_offset} + $_->{size}, @offset_files);
-   my $max_align= max(0, map $_->{device_align}, @aligned_files);
-   my $root_dirent_used= $self->{_root}{size} / 32;
+   my $root_cldata= $self->{_root}->clusterdata;
+   my (@offsets, @aligned, @others);
+   my %seen= ( refaddr($root_cldata) => 1 );
+   for my $dir ($self->{_root}, values $self->{_subdirs}->%*) {
+      for my $ent ($dir->ents->@*) {
+         my $cldat= $ent->clusterdata;
+         next unless $cldat && !$seen{refaddr $cldat}++;
+         push @{$cldat->offset? \@offsets : $cldat->align? \@aligned : \@others}, $cldat;
+      }
+   }
+   $log->debugf("_optimize_geometry offsets=%d aligned=%d others=%d",
+      scalar @offsets, scalar @aligned, scalar @others);
+   my $min_ofs= min(map $_->offset, @offsets);
+   my $max_ofs= max(map $_->offset + $_->size, @offsets);
+   my $max_align= max(0, map $_->align, @aligned);
+   my $root_dirent_used= $root_cldata->size / 32;
    isa_int $root_dirent_used && $root_dirent_used >= 1
       or die "BUG: root must always have one entry";
    my $bytes_per_sector= $self->bytes_per_sector;
@@ -737,11 +936,11 @@ sub _optimize_geometry($self, $dirs, $files) {
       # Count total sectors used by ->{size} of files and dirs.
       # Don't add root dir until we know it will be FAT32
       my $clusters= 0;
-      for (@$dirs, @offset_files, @aligned_files, @other_files) {
+      for (@offsets, @aligned, @others) {
          $clusters += ceil($_->{size} / $cluster_size);
       }
-      $log->tracef("with sectors_per_cluster=%d, would require at least %d clusters", $sectors_per_cluster, $clusters)
-         if $log->is_trace;
+      $log->tracef("with sectors_per_cluster=%d, would require at least %d clusters",
+         $sectors_per_cluster, $clusters);
       $clusters ||= 1;
       my ($reserved, $root_clusters_added);
       # If file alignment is a larger power of 2 than cluster_size, then as long as data_start
@@ -751,27 +950,27 @@ sub _optimize_geometry($self, $dirs, $files) {
       my $align= min($cluster_size, $max_align);
       if ($align) {
          # But wait, does every device_offset meet this alignment?  If not, give up.
-         for (@offset_files) {
-            if ($_->{device_offset} & ($align-1)) {
-               $fail_reason{$sectors_per_cluster}= "device_offset $_->{device_offset}"
-                  ." of $_->{uname} conflicts with your alignment request of $align";
+         for (@offsets) {
+            if ($_->offset & ($align-1)) {
+               $fail_reason{$sectors_per_cluster}= "device_offset $_->{offset}"
+                  ." of $_->{name} conflicts with your alignment request of $align";
                next cluster_size;
             }
          }
       }
-      elsif (@offset_files) {
+      elsif (@offsets) {
          # If not aligning clusters to pow2, might need to align to device_offset.
          # First, every device_offset must have the same remainder modulo cluster_size.
          my ($remainder, $prev);
-         for (@offset_files) {
-            my $r= $_->{device_offset} & ($cluster_size-1);
+         for (@offsets) {
+            my $r= $_->offset & ($cluster_size-1);
             if (!defined $remainder) {
                $remainder= $r;
                $prev= $_;
             } elsif ($remainder != $r) {
-               $fail_reason{$sectors_per_cluster}= "file $_->{uname} device_offset"
-                  ." $_->{device_offset} modulo cluster_size $cluster_size conflicts with"
-                  ." file $prev->{uname} device_offset $prev->{device_offset}";
+               $fail_reason{$sectors_per_cluster}= "file $_->{name} device_offset"
+                  ." $_->{offset} modulo cluster_size $cluster_size conflicts with"
+                  ." file $prev->{name} device_offset $prev->{offset}";
                next cluster_size;
             }
          }
@@ -787,10 +986,9 @@ sub _optimize_geometry($self, $dirs, $files) {
          if (!$root_clusters_added
             && $clusters > Sys::Export::VFAT::Geometry::FAT16_IDEAL_MAX_CLUSTERS()
          ) {
-            $root_clusters_added= ceil($self->{_root}{size} / $cluster_size);
+            $root_clusters_added= ceil($root_cldata->size / $cluster_size);
             $clusters += $root_clusters_added;
-            $log->trace("reached FAT32 threshold, adding $root_clusters_added clusters for root dir")
-               if $log->is_trace;
+            $log->tracef("reached FAT32 threshold, adding %s clusters for root dir", $root_clusters_added);
          }
          my $geom= Sys::Export::VFAT::Geometry->new(
             volume_offset          => $self->volume_offset,
@@ -803,9 +1001,8 @@ sub _optimize_geometry($self, $dirs, $files) {
          );
          $log->debugf("testing clusters=%d size=0x%X data_region=0x%X-%X min_ofs=0x%X max_ofs=0x%X",
             $clusters, $cluster_size, $geom->data_start_device_offset, $geom->data_limit_device_offset,
-            $min_ofs, $max_ofs)
-            if $log->is_debug;
-         if (@offset_files || @aligned_files) {
+            $min_ofs, $max_ofs);
+         if (@offsets || @aligned) {
             # tables are too large? Try again with larger clusters.
             if (defined $min_ofs && $min_ofs < $geom->data_start_device_offset) {
                $fail_reason{$sectors_per_cluster}= "FAT tables too large for requested device_offset $min_ofs";
@@ -821,13 +1018,13 @@ sub _optimize_geometry($self, $dirs, $files) {
          }
          # Now verify we have enough clusters by actually alocating them
          my $alloc= Sys::Export::VFAT::AllocationTable->new;
-         my %file_cluster;
+         my %assignment;
          unless (eval {
-            for my $f (@offset_files, @aligned_files, @other_files, @$dirs,
-               ($geom->bits == FAT32? ($self->{_root}) : ())
+            for my $cldata (@offsets, @aligned, @others,
+               ($geom->bits == FAT32? ($root_cldata) : ())
             ) {
-               my $cluster_ref= ($f->{FAT_cluster} //= [ undef ]);
-               $file_cluster{refaddr $cluster_ref} //= [ $self->_alloc_file($geom, $alloc, $f), $cluster_ref ];
+               my $chain= $self->_alloc_file($geom, $alloc, $cldata);
+               $alloc->get_chain($chain)->{clusterdata}= $cldata;
             }
             1
          }) {
@@ -842,60 +1039,22 @@ sub _optimize_geometry($self, $dirs, $files) {
          $alloc->max_cluster_id($geom->max_cluster_id);
          # Is this the smallest option so far?
          if (!$best || $best->{geom}->total_sector_count > $geom->total_sector_count) {
-            $best= { geom => $geom, alloc => $alloc, file_cluster => \%file_cluster };
+            $best= { geom => $geom, alloc => $alloc, cluster_assignment => \%assignment };
          }
       }
    } continue {
-      $log->tracef("%s", $fail_reason{$sectors_per_cluster}) if $log->is_trace;
+      $log->tracef("%s", $fail_reason{$sectors_per_cluster})
+         if defined $fail_reason{$sectors_per_cluster};
    }
    if (!$best) {
+      $log->debug("no cluster size works");
       $self->{_optimize_geometry_fail_reason}= \%fail_reason;
       return;
    }
-   return @{$best}{'geom','alloc','file_cluster'};
+   $log->debugf("best cluster_size is %d", $best->{geom}->bytes_per_cluster);
+   return @{$best}{'geom','alloc'};
 }
 
-# This returns a valid 8.3 filename which doesn't conflict with any of the keys in %$existing
-sub _coerce_to_83_name($name, $fc_existing) {
-   length $name or die "BUG";
-   $name= uc $name;
-   my $ext_pos= rindex($name, '.');
-   my $base= $ext_pos < 0? $name : substr($name, 0, $ext_pos);
-   my $ext=  $ext_pos < 0? ''    : substr($name, $ext_pos+1);
-   for ($base, $ext) {
-      # Replace every run of invalid chars with a single '_'
-      s/[^\x21\x23-\x29\x2D.\x30-\x39\x40-\x5A\x5E-\x7B\x7D-\xE4\xE6-\xFF]+/_/g;
-      # Now that all high characters have been removed, consider these to be bytes
-      utf8::downgrade($_);
-   }
-   $base= '~1' if !length $base; # a guess at how to handle ".foo", ->"~1.FOO" ?
-   substr($base, 6)= '~1' if length $base > 8;
-   substr($ext, 3)= '' if length $ext > 3;
-   my $suffix= !length $ext? '' : length $ext > 3? '.'.substr($ext,0,3) : ".$ext";
-   while ($fc_existing->{fc $base.$suffix}) {
-      if ($base =~ /^(.*?)~([0-9]+)\z/) {
-         my $next= $2 + 1;
-         croak "Can't find available ~N suffix for '$name'" if length($next) > 6;
-         $base= substr($1, 0, 7-length($next)) . '~' . $next;
-      } else {
-         $base= substr($base, 0, 6) . '~1'
-      }
-   }
-   return $base.$suffix;
-}
-
-sub _calc_FAT_attrs($self, $ent) {
-   # did user supply them?
-   my $flags= $ent->{FAT_attrs} // do {
-      # readonly determined by user -write bit of 'mode'
-      ((defined $ent->{mode} && !($ent->{mode} & 0400))? ATTR_READONLY : 0)
-      # hidden determined by leading '.' in filename
-      | (defined $ent->{FAT_longname} && $ent->{FAT_longname} =~ /^\./? ATTR_HIDDEN : 0)
-   };
-   # Is it a directory?
-   $flags |= ATTR_DIRECTORY if S_ISDIR($ent->{mode} // 0);
-   return $flags;
-}
 
 sub _epoch_to_fat_date_time($epoch) {
    my @lt = localtime($epoch);
@@ -913,107 +1072,17 @@ sub _epoch_to_fat_date_time($epoch) {
    return ($fat_date, $fat_time, $fat_frac);
 }
 
-sub _append_dirent($self, $dir, $file) {
-   $log->tracef("encoding dirent short=%-12s long=%s cluster=%s",
-      @{$file}{qw( FAT_shortname FAT_longname )},
-      $file->{FAT_cluster}? $file->{FAT_cluster}[0] : undef)
-      if $log->is_trace;
-
-   my $short11= $file->{FAT_short11} // die "BUG: FAT_short11 not set";
-   $short11 =~ s/^\xE5/\x05/; # \xE5 may occur in some charsets, and needs escaped
-
-   # Need Long-File-Name entries?
-   if (defined $file->{FAT_longname} && $file->{FAT_longname} ne $file->{FAT_shortname}) {
-      # Checksum for directory shortname, used to verify long name parts
-      my $cksum= 0;
-      $cksum= ((($cksum >> 1) | ($cksum << 7)) + $_) & 0xFF
-         for unpack 'C*', $short11;
-      # Each dirent holds up to 26 bytes (13 chars) of the long name
-      my @chars= unpack 'v*', encode('UTF-16LE', $file->{FAT_longname}, Encode::FB_CROAK|Encode::LEAVE_SRC);
-      # short final chunk is padded with \0\uFFFF*
-      if (my $remainder= @chars % 13) {
-         push @chars, 0;
-         push @chars, (0xFFFF)x(12 - $remainder);
-      }
-      my $last= ceil(@chars/13) - 1;
-      for my $i (reverse 0..$last) {
-         my $ofs= $i*13;
-         my $seq= ($i + 1) | (($i == $last) ? 0x40 : 0x00);
-         $dir->{data} .= pack('C v5 C C C v6 v v2',
-            $seq,                      # sequence and end-flag
-            @chars[$ofs .. $ofs+4],    # first 5 chars
-            0x0F, 0x00, $cksum,        # attr = LFN, type = 0
-            @chars[$ofs+5 .. $ofs+10], # next 6 chars
-            0,                         # no cluster number
-            @chars[$ofs+11 .. $ofs+12] # last 2 chars
-         );
-      }
-   }
-   # Encode actual entry, with short-name
-
-   my $attrs= $self->_calc_FAT_attrs($file);
-
-   $file->{mtime} //= time;
-   $file->{btime} //= $file->{mtime}; # creation "born" time
-   $file->{atime} //= $file->{mtime};
-   my ($cdate, $ctime, $ctime_frac)= _epoch_to_fat_date_time($file->{btime});
-   my ($wdate, $wtime)             = _epoch_to_fat_date_time($file->{mtime});
-   my ($adate)                     = _epoch_to_fat_date_time($file->{atime});
-   # References to the root dir are always encoded as cluster zero, even on FAT32
-   # where the root dir actually lives at a nonzero cluster.
-   # Volume label also doesn't need a cluster id.  Nor do empty files.
-   my $cluster= 0;
-   my $cluster_ref= $file->{FAT_cluster};
-   if ($cluster_ref && $cluster_ref != $self->{_root}{FAT_cluster}) {
-      if (defined $cluster_ref->[0]) {
-         $cluster= $cluster_ref->[0];
-      } else {
-         # If we need to encode a cluster which isn't known, append a function to the
-         # FAT_cluster which can later be called when the cluster is known, to repack
-         # the directory entry.
-         my $uname= "$dir->{uname}/$file->{FAT_shortname}";
-         my $data_ref= \$dir->{data}; # make sure not to close over '$dir'
-         my $ent_ofs= length($$data_ref);
-         $log->trace("temporarily encoding dirent $uname cluster as 0 to be patched later")
-            if $log->is_trace;
-         push @$cluster_ref, sub ($resolved_cluster) {
-            $log->trace("patching $uname with cluster id $resolved_cluster")
-               if $log->is_trace;
-            substr($$data_ref, $ent_ofs+20, 2, pack 'v', ($resolved_cluster>>16));
-            substr($$data_ref, $ent_ofs+26, 2, pack 'v', $resolved_cluster);
-         };
-      }
-   }
-   # Directories always have a size of 0
-   $log->tracef("size=%d cluster=%d", $file->{size}, $cluster) if $log->is_trace;
-   my $size= S_ISDIR($file->{mode})? 0 : $file->{size} // 0;
-   $dir->{data} .= pack('A11 C C C v v v v v v v V',
-      $short11, $attrs, 0, #NT_reserved
-      $ctime_frac, $ctime, $cdate, $adate,
-      $cluster >> 16, $wtime, $wdate, $cluster, $size);
-}
-
-sub _pack_dir($self, $dir) {
-   my $ents= $dir->{FAT_dirents} // croak "Dir not finalized";
-   $dir->{data}= '';
-   $self->_append_dirent($dir, $_) for @$ents;
-   die "BUG: calculated dir size $dir->{size} != data length ".length($dir->{data})
-      unless $dir->{size} == length $dir->{data};
-   # Dir must be padded to length of sector/cluster with entries whose name begins with \x00
-   # but that will happen automatically later as the data is appended to the file..
-}
-
-sub _alloc_file($self, $geom, $alloc, $file) {
-   my $sz= $file->{size} or do { carp "Attempt to allocate zero-length file"; return };
+sub _alloc_file($self, $geom, $alloc, $cldata) {
+   my $sz= $cldata->size or do { carp "Attempt to allocate zero-length file"; return };
    my $cl_count= POSIX::ceil($sz / $geom->bytes_per_cluster);
-   if ($file->{device_offset}) {
-      my ($cl, $n)= $geom->get_cluster_extent_of_device_extent($file->{device_offset}, $sz);
+   if ($cldata->offset) {
+      my ($cl, $n)= $geom->get_cluster_extent_of_device_extent($cldata->offset, $sz);
       return $alloc->alloc_range($cl, $cl_count)
-         // croak "Can't allocate $cl_count clusters from offset $file->{device_offset}";
-   } elsif ($file->{device_align}) {
-      my ($mul, $ofs)= $geom->get_cluster_alignment_of_device_alignment($file->{device_align});
+         // croak "Can't allocate $cl_count clusters from offset ".$cldata->offset;
+   } elsif ($cldata->align) {
+      my ($mul, $ofs)= $geom->get_cluster_alignment_of_device_alignment($cldata->align);
       return $alloc->alloc_contiguous($cl_count, $mul, $ofs)
-         // croak "Can't allocate $cl_count clusters aligned to $file->{device_align}";
+         // croak "Can't allocate $cl_count clusters aligned to ".$cldata->align;
    } else {
       return $alloc->alloc($cl_count)
          // croak "Can't allocate $cl_count clusters";
