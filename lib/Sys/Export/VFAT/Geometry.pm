@@ -549,7 +549,7 @@ sub get_cluster_offset($self, $cluster_id) {
    $self->get_cluster_start_sector($cluster_id) * $self->bytes_per_sector;
 }
 sub get_cluster_device_offset($self, $cluster_id) {
-   $self->volume_offset + $self->get_cluster_start_sector($cluster_id) * $self->bytes_per_sector;
+   $self->volume_offset + $self->get_cluster_offset($cluster_id);
 }
 
 sub get_cluster_of_sector($self, $sector_idx) {

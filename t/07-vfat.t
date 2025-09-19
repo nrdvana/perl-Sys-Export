@@ -85,7 +85,7 @@ subtest device_align_placement => sub {
       my $token2= "UniqueString9876543210";
 
       $dst->add([ file => "TEST.DAT", $token, { device_align => $align }]);
-      $dst->add([ file => "TEST2.DAT", $token2, { device_align => $align*2, device_offset => \my $addr }]);
+      my $f= $dst->add([ file => "TEST2.DAT", $token2, { device_align => $align*2 }]);
       $dst->finish;
 
       my $img= do { $tmp->seek(0,0); local $/; <$tmp> };
@@ -97,7 +97,7 @@ subtest device_align_placement => sub {
       ok( $offset > 0, 'offset > 0' );
       is( $offset & ($align-1), 0, "TEST.DAT aligned to $align" );
       is( $offset2 & (($align*2)-1), 0, "TEST2.DAT aligned to ".($align*2) );
-      is( $addr, $offset2, 'reported location of TEST2.DAT' );
+      is( $f->offset, $offset2, 'reported location of TEST2.DAT' );
    }
 };
 
