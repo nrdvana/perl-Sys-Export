@@ -270,7 +270,7 @@ A unicode full pathname for debugging
 
 =item long
 
-A unicode name not including path.  May be undef if file uses only a short name.
+A unicode name not including path.  May be C<undef> if file uses only a short name.
 
 =item short
 
@@ -279,8 +279,9 @@ range, but may contain high bytes for an unspecified character encoding.
 
 =item short11
 
-The 11 bytes of the short name to be encoded into a directory entry, used for volume labels and
-'.' and '..' entries.  L</long> and L</short> may be undefined if this is set.
+The 11 bytes of a short name (space-padded and with the extension '.' removed) to be encoded
+into a directory entry.  This is specified for volume labels and '.' and '..' entries instead
+of using the L</long> and L</short> attributes.
 
 =item attrs
 

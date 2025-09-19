@@ -109,9 +109,9 @@ sub new($class, @attrs) {
             : isa_handle $attrs[0]? ( filehandle => $attrs[0] )
             : ( filename => $attrs[0] );
    my $self= bless {}, $class;
-   $self->{_root}= $self->_new_dir('(root)', undef);
+   $self->{root}= $self->_new_dir('(root)', undef);
    # keep root dir separate from subdirs
-   delete $self->{_subdirs}{refaddr $self->{_root}};
+   delete $self->{_subdirs}{refaddr $self->{root}};
    # apply other attributes
    $self->$_($attrs{$_}) for keys %attrs;
    $self;
@@ -136,9 +136,12 @@ Output filehandle to write.  The file will be enlarged if it is not big enough.
 
 =cut
 
-sub _root { $_[0]{_root} }
 sub filename { @_ > 1? ($_[0]{filename}= $_[1]) : $_[0]{filename} }
 sub filehandle { @_ > 1? ($_[0]{filehandle}= $_[1]) : $_[0]{filehandle} }
+
+=attribute root
+
+The root L<Directory|Sys::Export::VFAT::Directory> object.
 
 =attribute geometry
 
@@ -158,6 +161,7 @@ volume, and methods like L</get_file_device_extent> will return ofsets relative 
 
 =cut
 
+sub root($self) { $self->{root} }
 sub geometry($self) { $self->{geometry} }
 sub allocation_table($self) { $self->{allocation_table} }
 
@@ -402,7 +406,7 @@ sub add($self, $spec) {
    }
 
    # Walk through the tree based on the case-folded path
-   my $dir= $self->{_root};
+   my $dir= $self->root;
    for (@path) {
       my $ent= $dir->child($_);
       if ($ent) {
@@ -450,7 +454,7 @@ You may get exceptions during this call if there isn't a way to write your files
 =cut
 
 sub finish($self) {
-   my $root= $self->{_root};
+   my $root= $self->root;
    # Find out the size of every directory, and build ->{_allocs}, ->{_dir_allocs} and ->{_special_allocs}
    $_->calc_size for $root, values $self->{_subdirs}->%*;
    # calculate what geometry gives us the best size, when rounding each file to that cluster
@@ -530,7 +534,7 @@ sub _write_filesystem($self, $fh, $geom, $alloc) {
    }
    # For FAT12/FAT16, write the root directory entries
    if ($geom->bits < FAT32) {
-      my $root= $self->{_root};
+      my $root= $self->root;
       die "BUG: mis-sized FAT16 root directory"
          if !$root->size || ($root->size & 31)
             || length ${$root->data_ref} != $root->size
@@ -619,7 +623,7 @@ sub is_valid_volume_label {
 sub _optimize_geometry($self) {
    # calculate what geometry gives us the best size, when rounding each file to that cluster
    # size vs. the size of the FAT it generates, and also meting the needs of alignment requests
-   my $root= $self->{_root};
+   my $root= $self->root;
    my (@offsets, @aligned, @others);
    my %seen= ( refaddr($root) => 1 );
    for my $dir ($root, values $self->{_subdirs}->%*) {
