@@ -21,7 +21,7 @@ directory listing.
 
 sub new($class, %attrs) {
    my $self= bless {}, $class;
-   for (qw( name size cluster align offset data_ref data_path )) {
+   for (qw( name size flags btime atime mtime cluster align offset data_ref data_path )) {
       if (defined (my $v= delete $attrs{$_})) {
          $self->{$_}= $v
       }
@@ -45,6 +45,22 @@ A scalar-ref to literal data of this file
 =attribute data_path
 
 Path string to file's data
+
+=attribute flags
+
+Default directory listing flags (can be overridden on directory entry)
+
+=attribute btime
+
+Default creation ('born') unix epoch time (can be overridden on directory entry)
+
+=attribute mtime
+
+Default modification unix epoch time (can be overridden on directory entry)
+
+=attribute atime
+
+Default last-access unix epoch time (can be overridden on directory entry)
 
 =attribute align
 
@@ -70,6 +86,10 @@ sub name      { $_[0]{name} }
 sub size      { $_[0]{size} }
 sub data_ref  { $_[0]{data_ref} }
 sub data_path { $_[0]{data_path} }
+sub flags     { $_[0]{flags} }
+sub mtime     { $_[0]{mtime} }
+sub atime     { $_[0]{atime} }
+sub btime     { $_[0]{btime} }
 sub align     { $_[0]{align} }
 sub offset    { $_[0]{offset} }
 sub cluster   { $_[0]{cluster} }

@@ -25,7 +25,8 @@ use constant {
 };
 use Exporter 'import';
 our @EXPORT_OK= qw( FAT12 FAT16 FAT32 ATTR_READONLY ATTR_HIDDEN ATTR_SYSTEM ATTR_ARCHIVE
-  ATTR_VOLUME_ID ATTR_DIRECTORY is_valid_longname is_valid_shortname is_valid_volume_label );
+  ATTR_VOLUME_ID ATTR_DIRECTORY is_valid_longname is_valid_shortname is_valid_volume_label
+  build_shortname );
 use Sys::Export qw( :isa expand_stat_shorthand );
 use Sys::Export::VFAT::Geometry qw( FAT12 FAT16 FAT32 );
 require Sys::Export::VFAT::AllocationTable;
@@ -118,8 +119,8 @@ sub new($class, @attrs) {
 }
 
 # Create dir, and store a strong reference in ->{_subdirs}
-sub _new_dir($self, $name, $parent) {
-   my $dir= Sys::Export::VFAT::Directory->new(name => $name, parent => $parent);
+sub _new_dir($self, $name, $parent, %attrs) {
+   my $dir= Sys::Export::VFAT::Directory->new(name => $name, parent => $parent, %attrs);
    $self->{_subdirs}{refaddr $dir}= $dir;
    $dir;
 }
@@ -274,7 +275,7 @@ sub _minimum_offset_to_data {
   #   uname              => $path_unicode_string,
   #   FAT_shortname      => "8CHARATR.EXT",
   #   mode               => $unix_stat_mode,
-  #   FAT_attrs          => ATTR_READONLY|ATTR_HIDDEN|ATTR_SYSTEM|ATTR_ARCHIVE,
+  #   FAT_flags          => ATTR_READONLY|ATTR_HIDDEN|ATTR_SYSTEM|ATTR_ARCHIVE,
   #   atime              => $unix_epoch,
   #   mtime              => $unix_epoch,
   #   btime              => $unix_epoch,
@@ -337,7 +338,7 @@ sub add($self, $spec) {
       or croak "Require 'uname' or 'name'";
    defined $spec->{mode} or croak "Require 'mode'";
 
-   # If user supplied FAT_utf16_name, use that as a more official source of Unicode
+   # If user supplied uname, use that as a more official source of Unicode
    my $path= $spec->{uname} // decode('UTF-8', $spec->{name}, Encode::FB_CROAK | Encode::LEAVE_SRC);
    $path =~ s,^/,,; # remove leading slash, if any
 
@@ -347,8 +348,21 @@ sub add($self, $spec) {
       for @path;
    my $leaf= pop @path;
 
+   # Walk through the tree based on the case-folded path
+   my $dir= $self->root;
+   for (@path) {
+      my $ent= $dir->child($_);
+      if ($ent) {
+         croak $ent->name." is not a directory, while attempting to add '$path'"
+            unless $ent->{file} && $ent->{file}->is_dir;
+      } else { # auto-create directory
+         $ent= $dir->add($_, $self->_new_dir($dir->name."/$_", $dir), autovivified => 1);
+      }
+      $dir= $ent->{file};
+   }
+
    # did user supply FAT attribute bitmask?
-   my $attrs= $spec->{FAT_attrs} // do {
+   my $flags= $spec->{FAT_flags} // do {
       # readonly determined by user -write bit of 'mode'
       (!($spec->{mode} & 0400)? ATTR_READONLY : 0)
       # hidden determined by leading '.' in filename
@@ -393,54 +407,46 @@ sub add($self, $spec) {
             or croak "Invalid device_offset '$offset' for file '$path'";
       }
       $file= Sys::Export::VFAT::File->new(
-         name => $path, size => $size,
-         align => $align, offset => $offset,
-         data_ref => $data_ref, data_path => $data_path,
+         name => $path, size => $size, flags => $flags,
+         align => $align, offset => $offset, data_ref => $data_ref, data_path => $data_path,
+         $spec->%{qw( atime btime mtime )},
       );
    } elsif (S_ISDIR($spec->{mode})) {
-      $attrs |= ATTR_DIRECTORY;
+      $flags |= ATTR_DIRECTORY;
+      # If adding this directory overtop a previous auto-vivified directory, just update
+      # all the attributes of the existing object.
+      if (my $cur= $dir->child($leaf)) {
+         if ($cur->{autovivified} && $cur->{file} && $cur->{file}->is_dir) {
+            for (qw( btime atime mtime )) {
+               $cur->{file}{$_}= $spec->{$_} if defined $spec->{$_};
+            }
+            $cur->{file}{flags}= $flags;
+            delete $cur->{autovivified};
+            $log->debugf("updated attributes of %s", $path);
+            return $cur->{file};
+         }
+      } else {
+         $file= $self->_new_dir($path, $dir, flags => $flags, $spec->%{qw( atime mtime btime )});
+      }
    }
    else {
       # TODO: add conditional symlink support via hardlinks
       croak "Can only export files or directories into VFAT"
    }
 
-   # Walk through the tree based on the case-folded path
-   my $dir= $self->root;
-   for (@path) {
-      my $ent= $dir->child($_);
-      if ($ent) {
-         croak $ent->name." is not a directory, while attempting to add '$path'"
-            unless $ent->is_dir;
-      } else { # auto-create directory
-         $ent= $dir->add_ent(
-            name => $dir->name."/$_",
-            attrs => ATTR_DIRECTORY,
-            autovivified => 1,
-            file => $self->_new_dir($dir->name."/$_", $dir)
-         );
-      }
-      $dir= $ent->file;
-   }
-   # Add the new entry to this dir - croaks on name collision
-   my $ent= $dir->add_ent({
-      name => $path,
-      attrs => $attrs,
-      file => $file,
-      $spec->%{qw( atime mtime btime )},
-      (length $spec->{FAT_shortname}? (short => $spec->{FAT_shortname}) : ())
-   });
-   # initialize after add_ent in case the new dirent inherited an autovivified dir
-   $ent->file($self->_new_dir($path, $dir))
-      if $ent->is_dir && !$ent->file;
+   # this also checks for name collisions on shortname
+   my $ent= $dir->add($leaf, $file, shortname => $spec->{FAT_shortname});
 
    $log->debugf("added %s longname=%s shortname=%s %s",
-      $ent->name, $ent->long, $ent->short, $ent->is_dir? 'DIR'
-      : $ent->file? sprintf("size=0x%X device_align=0x%X device_offset=0x%X",
-         $ent->file->size, $ent->file->align, $ent->file->offset)
-      : 'size=0 (empty file)' )
+      $path, $ent->{name}, $ent->{shortname}, (
+         !$ent->{file}? 'size=0 (empty file)'
+         : $ent->{file}->is_dir? 'DIR'
+         : sprintf("size=0x%X device_align=0x%X device_offset=0x%X",
+            $ent->{file}->size, $ent->{file}->align, $ent->{file}->offset)
+      ))
       if $log->is_debug;
-   $ent->file;
+
+   $ent->{file};
 }
 
 =method finish
@@ -589,35 +595,74 @@ C<$name> should be encoded as platform-native bytes, with no codepoints above 0x
 
 =cut
 
-sub is_valid_longname {
-   shift if @_ > 1 && "$_[0]"->isa(__PACKAGE__);
+sub is_valid_longname($name) {
    # characters permitted for LFN are all letters numbers and $%'-_@~`!(){}^#&+,;=[].
    # and space and all codepoints above 0x7F.
    # they may not begin with space, and cannot exceed 255 chars.
-   !!($_[0] !~ /^(\.+\.?)\z/ # dot and dotdot are reserved
-   && $_[0] =~ /^
-      [\x21\x23-\x29\x2B-\x2E\x30-\x39\x3B\x3D\x40-\x5B\x5D-\x7B\x7D-\xE4\xE6-]
-      [\x20\x21\x23-\x29\x2B-\x2E\x30-\x39\x3B\x3D\x40-\x5B\x5D-\x7B\x7D-\xE4\xE6-]{0,254}
+   !!($name !~ /^(\.+\.?)\z/ # dot and dotdot are reserved
+   && $name =~ /^
+      [^\x00-\x20\x22\x2A\x2F\x3A\x3C\x3E\x3F\x5C\x7C\x7F]
+      [^\x00-\x1F\x22\x2A\x2F\x3A\x3C\x3E\x3F\x5C\x7C]{0,254}
       \z/x);
 }
 
-sub is_valid_shortname {
-   shift if @_ > 1 && "$_[0]"->isa(__PACKAGE__);
-   !!($_[0] eq uc $_[0]
-   && $_[0] =~ /^
-      [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]{1,8}
-      [\x20\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]{0,7}
-      ( \. [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]{0,3} )
+sub is_valid_shortname($name) {
+   !!($name eq uc $name
+   && $name =~ /^
+      [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x7E\x80-\xFF]
+      [\x20\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x7E\x80-\xFF]{0,7}
+      (?: \.
+         ( [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D-\xFF]
+           [\x20\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D-\xFF]{0,2}
+         )?
+      )?
       \z/x);
 }
 
-sub is_valid_volume_label {
-   shift if @_ > 1 && "$_[0]"->isa(__PACKAGE__);
+sub is_valid_volume_label($name) {
    # same as shortname but no '.' and space is allowed
-   !!($_[0] =~ /^
-      [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]
-      [\x20\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D\x80-\xFF]{0,10}
+   !!($name =~ /^
+      [\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D-\xFF]
+      [\x20\x21\x23-\x29\x2D\x30-\x39\x40-\x5A\x5E-\x7B\x7D-\xFF]{0,10}
       \z/x);
+}
+
+=export build_shortname
+
+  $short= build_shortname($longname, \%foldcase_hash);
+
+Given a unicode "long name", calculate a 8.3 "short name" which doesn't conflict with any of
+the names in C<%foldcase_hash> (where each key is case-folded with C<fc>).
+
+=cut
+
+sub build_shortname($name, $ent_by_fc) {
+   length $name or croak "name cannot be empty";
+   my $ext_pos= rindex($name, '.');
+   my $base= uc($ext_pos < 0? $name : substr($name, 0, $ext_pos));
+   my $ext=  uc($ext_pos < 0? ''    : substr($name, $ext_pos+1));
+   for ($base, $ext) {
+      # Replace every run of invalid chars with a single '_'
+      s/[^\x21\x23-\x29\x2D.\x30-\x39\x40-\x5A\x5E-\x7B\x7D-\xE4\xE6-\xFF]+/_/g;
+      # Now that all high characters have been removed, optimize these as bytes
+      utf8::downgrade($_);
+   }
+   $ext= '.'.substr($ext,0,3) if length $ext;
+   my ($iter, $iter_len, $base_len)= (0,0, length $base);
+   if (!$base_len || $base_len > 8) {
+      substr($base, min($base_len,6), $base_len, '~1');
+      ($iter, $iter_len)= (1, 2);
+   }
+   while ($ent_by_fc->{fc $base.$ext}) {
+      my $next_iter_len= 1 + length ++$iter;
+      my $iter_pos= min($base_len, 8 - $next_iter_len);
+      croak "Can't find available ~N suffix for '$name'"
+         if $iter_pos < 0;
+      substr($base, $iter_pos, $next_iter_len, '~'.$iter);
+      $iter_len= $next_iter_len;
+   }
+   is_valid_shortname($base.$ext) or die "BUG: '$base$ext' is not a valid shortname";
+   return $base.$ext;
 }
 
 sub _optimize_geometry($self) {
@@ -628,7 +673,7 @@ sub _optimize_geometry($self) {
    my %seen= ( refaddr($root) => 1 );
    for my $dir ($root, values $self->{_subdirs}->%*) {
       for my $ent ($dir->ents->@*) {
-         my $file= $ent->file;
+         my $file= $ent->{file};
          next unless $file && !$seen{refaddr $file}++;
          push @{$file->offset? \@offsets : $file->align? \@aligned : \@others}, $file;
       }

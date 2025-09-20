@@ -4,7 +4,7 @@ use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
 use POSIX 'ceil';
 use Test2AndUtils;
 use experimental qw( signatures );
-use Sys::Export::VFAT qw( FAT12 FAT16 FAT32 );
+use Sys::Export::VFAT qw( FAT12 FAT16 FAT32 is_valid_shortname is_valid_longname );
 
 # Additional tests if host contains fsck.vfat
 chomp(my $fsck= `which fsck.vfat`);
@@ -17,6 +17,31 @@ sub fsck($fname) {
       is( $?, 0, $cmd );
    }
 }
+
+subtest is_valid_shortname => sub {
+   ok( is_valid_shortname($_), "valid short '$_'" )
+      for '12345678',
+          '12345678.',
+          '12345678.9AB',
+          'A B.C D',
+          "&%'-_@~`.!()",
+          '${}^#';
+   ok( !is_valid_shortname($_), "invalid short '$_'" )
+      for '+', ',', ';', '=', '[', ']',
+          ' A';
+};
+
+subtest is_valid_longname => sub {
+   ok( is_valid_longname($_), "valid long '$_'" )
+      for '12345678',
+          '12345678.',
+          '12345678.9AB',
+          "&%'-_@~`.!()",
+          '${}^#',
+          '+,;=[]';
+   ok( !is_valid_shortname($_), "invalid long '$_'" )
+      for '<', '>', '|';
+};
 
 subtest empty_fs => sub {
    my $tmp= File::Temp->new;
