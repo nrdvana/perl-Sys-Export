@@ -8,6 +8,7 @@ use warnings;
 use experimental qw( signatures );
 use Fcntl qw( S_IFDIR S_IFMT );
 use Scalar::Util 'blessed';
+use Encode ();
 use Carp;
 our @CARP_NOT= qw( Sys::Export Sys::Export::Unix );
 require Sys::Export::Unix; # for _dev_major_minor 
@@ -131,7 +132,7 @@ sub virtual_inodes {
     mtime => #
     rdev  => # or, ( rdev_major =>, rdev_minor => )
     name  => # full path name, no leading '/'
-    data  => # full content of file or symlink
+    data  => # scalar ref of file data, or scalar symlink target
   });
 
 This simply packs the file metadata into a CPIO header, then writes the header, filename, and
@@ -152,9 +153,13 @@ sub add($self, $fileinfo) {
    defined $name or croak "require 'name'";
 
    # Die on encoding mistakes
-   !utf8::is_utf8($fileinfo->{data}) or utf8::downgrade($fileinfo->{data}, 1)
-      or croak "->{data} must be 8-bit, but encountered wide character at $name";
-   my $size= length($fileinfo->{data}) // 0;
+   my ($size, $data_ref)= (0);
+   if (defined $fileinfo->{data}) {
+      $data_ref= ref $fileinfo->{data}? $fileinfo->{data} : \$fileinfo->{data};
+      croak "->{data} must be 8-bit, but encountered wide character at $name"
+         if utf8::is_utf8($$data_ref) && !utf8::downgrade($$data_ref, 1);
+      $size= length $$data_ref;
+   }
    # Handle hard links
    if ($nlink && $nlink > 1 && ($mode & S_IFMT) != S_IFDIR) {
       my $hardlink_key= "$dev_major:$dev_minor:$ino";
@@ -184,9 +189,10 @@ sub add($self, $fileinfo) {
    die "BUG" if length $header & 3;
 
    $self->{fh}->print($header) || die "write: $!";
-   # This is written in multiple parts like this because $fileinfo->{data} might be a File::Map,
-   #  and optimal to pass that directly back to fprint without a perl-side concatenation.
-   $self->{fh}->print($fileinfo->{data}) || die "write: $!"
+   # This is written in multiple parts like this because $fileinfo->{data} might be a memory-
+   #  mapped file, and optimal to pass that directly back to fprint without a perl-side
+   #  concatenation.
+   $self->{fh}->print($$data_ref) || die "write: $!"
       if $size;
    $self->{fh}->print("\0"x(4-($size & 3))) || die "write: $!"
       if $size & 3; # pad to multiple of 4
@@ -198,8 +204,8 @@ sub _fileinfo_get_name_bytes($f) {
       !utf8::is_utf8($name) or utf8::downgrade($name, 1)
          or croak "->{name} must be encoded as bytes, but encountered wide character at $name";
       return $name;
-   } elsif (defined $fileinfo->{uname}) {
-      return encode('UTF-8', $fileinfo->{uname}, Encode::FB_CROAK);
+   } elsif (defined $f->{uname}) {
+      return Encode::encode('UTF-8', $f->{uname}, Encode::FB_CROAK|Encode::LEAVE_SRC);
    } else {
       croak "Must specify either 'name' or 'uname'";
    }

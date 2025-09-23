@@ -19,13 +19,13 @@ BEGIN {
 }
 our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
-   isa_handle isa_pow2 round_up_to_pow2 round_up_to_multiple
+   isa_handle isa_pow2 round_up_to_pow2 round_up_to_multiple map_or_load_file filedata
    add skip find which finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
    S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
    S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
 );
 our %EXPORT_TAGS= (
-   basic_methods => [qw( exporter add skip find which finish rewrite_path rewrite_user rewrite_group )],
+   basic_methods => [qw( exporter add skip find which finish rewrite_path rewrite_user rewrite_group filedata )],
    isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_handle isa_int isa_pow2 )],
    stat_modes => [qw( S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT )],
    stat_tests => [qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT )],
@@ -59,6 +59,15 @@ if (eval { require Module::Runtime; }) {
   
   # recurse and filter directories with 'find'
   add find 'usr/share/zoneinfo', sub { ! /(leapseconds|\.tab|\.list)$/ };
+  
+  # Inject dynamically generated files
+  add [ file400 => "/etc/some-service.conf", <<~END ];
+      # Some config file
+      secret = $secret
+      END
+  
+  # Inject files that come from a different name, or outside the 'src' tree
+  add [ file644 => "/opt/some-app/data", filedata("/path/to/some/data") ];
   
   # For Linux, generate minimal /etc/passwd /etc/group /etc/shadow according
   # to UID/GID which were exported so far.
@@ -421,5 +430,65 @@ sub round_up_to_multiple($n, $pow2) {
    return ($n + $mask) & ~$mask;
 }
 
+=head2 map_or_load_file
+
+  $scalar_ref= map_or_load_file($path);
+  $scalar_ref= map_or_load_file($path, $offset);
+  $scalar_ref= map_or_load_file($path, $offset, $length);
+
+If L<File::Map> is available, this creates a read-only memory map of the file (from the
+specified offset) and rreturns a scalar ref to it.  If not, it simply loads the file into
+a scalar and returns a ref to that.  You should assume the data in the scalar is read-only.
+
+=cut
+
+if (eval { require File::Map; }) {
+   eval q{
+      sub map_or_load_file($filename, $offset=0, $length=undef) {
+         my $buf;
+         defined $length? File::Map::map_file($buf, $filename, "<", $offset, $length)
+            : File::Map::map_file($buf, $filename, "<", $offset, $length);
+         return \$buf;
+      }
+      1;
+   } or die "$@";
+} else {
+   *map_or_load_file= *_load_file;
+}
+
+sub _load_file($filename, $offset= 0, $length= undef) {
+   open my $fh, "<:raw", $filename
+      or die "open($filename): $!";
+   my $size= -s $fh;
+   croak "Offset beyond end of file ($filename, $offset > $size)" if $offset > $size;
+   $length //= $size - $offset;
+   my $buf= '';
+   if ($length) {
+      if ($offset > 0) {
+         sysseek($fh, $offset, 0) == $offset
+            or croak "sysseek($filename, $offset): $!";
+      }
+      sysread($fh, $buf, $length) == $size
+         or die "sysread($filename, $size): $!";
+   }
+   \$buf;
+}
+
+=head2 filedata
+
+  $filedata= filedata($path);
+  $filedata= filedata($path, $offset);
+  $filedata= filedata(\$scalar_ref, $offset, $length);
+
+This is a shortcut for creating L<Sys::Export::LazyFileData> objects.  These objects delay the
+memory-mapping of a file (or substr operation on a large scalar) until it is needed.  This is
+a convenient way to pass file data to various methods such as L</add>.
+
+=cut
+
+sub filedata {
+   state $loaded= require Sys::Export::LazyFileData;
+   Sys::Export::LazyFileData->new(@_);
+}
 
 1;

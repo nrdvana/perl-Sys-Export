@@ -127,6 +127,7 @@ sub _strz_from_offset {
 =cut
 
 sub unpack {
+   # This doesn't copy $_[0] into a variable because it might be a memory-map
    my %elf;
 
    # Start with the encoding-independent fields

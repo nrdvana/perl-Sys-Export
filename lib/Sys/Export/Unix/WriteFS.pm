@@ -82,6 +82,7 @@ use v5.26;
 use warnings;
 use experimental qw( signatures );
 use Carp qw( croak carp );
+use Scalar::Util qw( blessed );
 our @CARP_NOT= qw( Sys::Export::Unix );
 use Cwd qw( abs_path );
 use Sys::Export qw( :stat_modes :stat_tests isa_hash );
@@ -160,8 +161,7 @@ sub DESTROY($self, @) {
 Add content to a destination path.  File attributes are:
 
   name            # destination path relative to destination root
-  data            # literal data content of file (must be bytes, not unicode)
-  data_path       # absolute path of file to load 'data' from
+  data            # scalar ref of file data (must be bytes, not unicode)
   dev             # device, from stat
   dev_major       # major(dev), if you know it and don't know 'dev'
   dev_minor       # minor(dev), if you know it and don't know 'dev'
@@ -207,7 +207,7 @@ sub add($self, $file) {
         : S_ISFIFO($mode)? $self->_add_fifo($file)
         : S_ISSOCK($mode)? $self->_add_socket($file)
         : croak "Can't export ".(S_ISWHT($mode)? 'whiteout entries' : '(unknown)')
-            .': "'.($file->{src_path} // $file->{data_path} // $file->{name}).'"'
+            .': "'.($file->{src_path} // $file->{name}).'"'
 }
 
 our %_mode_name= (
@@ -258,10 +258,8 @@ sub _croak_if_different($self, $file, $old) {
 
 # Compare file contents for equality
 sub _contents_same($file, $dst_abs) {
-   Sys::Export::Unix::_load_or_map_file($file->{data}, $file->{data_path})
-      unless defined $file->{data};
-   Sys::Export::Unix::_load_or_map_file(my $dst_data, $dst_abs);
-   return $file->{data} eq $dst_data;
+   my $dst_data= Sys::Export::map_or_load_file($dst_abs);
+   return ${$file->{data}} eq $$dst_data;
 }
 
 # compare device nodes for equality
@@ -281,7 +279,6 @@ sub _rdev_same($file, $old) {
 # Install a file into ->dst
 sub _add_file($self, $file) {
    my $dst= $self->dst_abs . $file->{name};
-   my $tmp= $file->{data_path};
    # See if this is supposed to be a hardlink
    if ($file->{nlink} > 1) {
       if (defined(my $already= $self->_link_map->{"$file->{dev}:$file->{ino}"})) {
@@ -294,16 +291,17 @@ sub _add_file($self, $file) {
    # Record all file inodes in case a delayed hardlink is created by the caller
    $self->_link_map->{"$file->{dev}:$file->{ino}"}= $dst
       if defined $file->{dev} && defined $file->{ino};
-   # The caller may have created data_path within our ->tmp directory.
-   # If not, first write the data into a temp file there.
-   if (!defined $tmp || substr($tmp, 0, length $self->tmp) ne $self->tmp) {
-      if (!defined $file->{data}) {
-         defined $file->{data_path}
-            or croak "No 'data' or 'data_path' for file $file->{name}";
-         Sys::Export::Unix::_load_or_map_file($file->{data}, $file->{data_path});
-      }
+   # Write data into a temp file on same filesystem, then rename it into place
+   #  to ensure we never write a partial file into the destination.
+   # But, check if the caller gave us a LazyFileData within our ->tmp directory.
+   my $tmp;
+   if (blessed $file->{data} && $file->{data}->can('abs_path')
+      && substr($file->{data}->abs_path//'', 0, length $self->tmp) eq $self->tmp
+   ) {
+      $tmp= $file->{data}->abs_path;
+   } else {
       $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
-      Sys::Export::Unix::_syswrite_all($tmp, \$file->{data});
+      Sys::Export::Unix::_syswrite_all($tmp, $file->{data});
    }
    # Apply matching permissions and ownership
    $self->_apply_stat("$tmp", $file);

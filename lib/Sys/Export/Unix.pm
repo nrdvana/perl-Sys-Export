@@ -100,14 +100,14 @@ use Carp qw( croak carp );
 use Cwd qw( abs_path );
 use Scalar::Util qw( blessed looks_like_number );
 use List::Util qw( max );
-use Sys::Export qw( :isa :stat_modes :stat_tests );
+use Sys::Export qw( :isa :stat_modes :stat_tests map_or_load_file );
 use File::Temp ();
 use POSIX ();
 use Sys::Export::LogAny;
+require Sys::Export::LazyFileData;
 require Sys::Export::Exporter;
 our @CARP_NOT= qw( Sys::Export );
 our @ISA= qw( Sys::Export::Exporter );
-our $have_file_map= !!eval { require File::Map };
 our $have_unix_mknod= !!eval { require Unix::Mknod; };
 
 sub new {
@@ -649,8 +649,7 @@ The file attributes are:
 
   name            # destination path relative to destination root
   src_path        # source path relative to source root, no leading '/'
-  data            # literal data content of file (must be bytes, not unicode)
-  data_path       # absolute path of file to load 'data' from, not limited to src dir
+  data            # scalar or scalar-ref or LazyFileData object
   dev             # device of origin, as per lstat
   dev_major       # major(dev), if you know it and don't know 'dev'
   dev_minor       # minor(dev), if you know it and don't know 'dev'
@@ -1054,12 +1053,12 @@ sub get_dst_uid_gid($self, $uid, $gid, $context='') {
 sub _export_file($self, $file) {
    # If the file has a link count > 1, check to see if we already have it in the destination
    my $prev;
-   if ($file->{nlink} > 1 && defined $file->{data_path}) {
+   if ($file->{nlink} > 1 && $file->{dev} && $file->{ino}) {
       if (defined($prev= $self->_link_map->{"$file->{dev}:$file->{ino}"})) {
          $self->log->debugf("Already exported inode %s:%s as '%s'", $file->{dev}, $file->{ino}, $prev);
          # make a link of that file instead of copying again
          $self->_log_action("LNK", $prev, $file->{name});
-         # ensure the dst realizes it is a symlink by sending it without data
+         # ensure the dst realizes it is a hardlink by sending it without data
          delete $file->{data};
          delete $file->{data_path};
       }
@@ -1068,11 +1067,13 @@ sub _export_file($self, $file) {
       }
    }
    if (!defined $prev) {
-      # Load the data, unless already provided
-      unless (defined $file->{data}) {
-         defined $file->{data_path}
+      # Normalize data to a scalar-ref
+      if (defined $file->{data_path}) {
+         $file->{data}= Sys::Export::LazyFileData->new($file->{data_path});
+      } elsif (!ref $file->{data}) {
+         defined $file->{data}
             or croak "For regular files, must specify ->{data} or ->{data_path}";
-         _load_or_map_file($file->{data}, $file->{data_path});
+         $file->{data}= \delete $file->{data};
       }
       my @notes;
       $self->process_file($file, \@notes)
@@ -1091,9 +1092,9 @@ It is only called automatically for file entries with a C<< ->{src_path} >> attr
 Files without that attribute are assumed to be prepared for the destination already.
 Processing is only performed once per inode, in the case of multiple hardlinks.
 
-When called, the C<< $file->{data} >> has already been loaded (or mem-mapped).  If you need to
-modify it, be sure to C<< delete $file->{data} >> and replace it with a new value, since the
-memory-map is read-only.
+When called, the C<< $file->{data} >> has already been loaded (or mem-mapped) and will be a
+scalar-ref.  If you need to modify it, replaace the ref and do not modify the scalar, since a
+memory-map will be read-only.
 
 The C<@notes> parameter is an arrayref of flags to be added to the logging, to let the user
 know what processing steps were performed on the file.
@@ -1108,10 +1109,10 @@ override.
 
 sub process_file($self, $file, $notes) {
    # Check for ELF signature or script-interpreter
-   if (substr($file->{data}, 0, 4) eq "\x7fELF") {
+   if (substr(${$file->{data}}, 0, 4) eq "\x7fELF") {
       $self->log->tracef("Detected ELF signature in '%s'", $file->{name});
       $self->process_elf_file($file, $notes);
-   } elsif ($file->{data} =~ m,^#!\s*/(\S+),) {
+   } elsif (${$file->{data}} =~ m,^#!\s*/(\S+),) {
       $self->log->tracef("Detected script interpreter '%s' in '%s'", $1, $file->{name});
       $self->process_script_file($file, $notes);
    }
@@ -1141,7 +1142,7 @@ rewritten it also calls 'patchelf' to change the path to the interpreter and/or 
 
 sub process_elf_file($self, $file, $notes) {
    require Sys::Export::ELF;
-   my $elf= Sys::Export::ELF::unpack($file->{data});
+   my $elf= Sys::Export::ELF::unpack(${$file->{data}});
    my ($interpreter, @libs);
    if ($elf->{dynamic}) {
       $self->log->debugf("Dynamic-linked ELF file: '%s' (src_path=%s)", $file->{name}, $file->{src_path});
@@ -1179,12 +1180,12 @@ sub process_elf_file($self, $file, $notes) {
 
          # Create a temporary file so we can run patchelf on it
          my $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
-         _syswrite_all($tmp, \$file->{data});
+         _syswrite_all($tmp, $file->{data});
+         $tmp->close;
          my @patchelf= ( '--set-interpreter' => $interpreter );
          push @patchelf, ( '--set-rpath' => $rpath ) if length $rpath;
          $self->_patchelf($tmp, @patchelf);
-         delete $file->{data};
-         $file->{data_path}= $tmp;
+         $file->{data}= map_or_load_file("$tmp");
          push @$notes, '+patchelf';
       } else {
          $self->log->debug("  no interpreter/lib paths affected by rewrites");
@@ -1203,7 +1204,7 @@ processing method.
 
 sub process_script_file($self, $file, $notes) {
    # Make sure the interpreter is added, and also rewrite its path
-   my ($interp)= ($file->{data} =~ m,^#!\s*/(\S+),)
+   my ($interp)= (${$file->{data}} =~ m,^#!\s*/(\S+),)
       or return;
    $self->add($interp);
    if ($self->_has_rewrites) {
@@ -1211,13 +1212,13 @@ sub process_script_file($self, $file, $notes) {
       my $rre= $self->path_rewrite_regex;
       if ($interp =~ s,^$rre,$self->{path_rewrite_map}{$1},e) {
          # note file->{data} could be a read-only memory map
-         my $data= delete($file->{data}) =~ s,^(#!\s*)(\S+),$1/$interp,r;
-         $file->{data}= $data;
+         my $data= ${$file->{data}} =~ s,^(#!\s*)(\S+),$1/$interp,r;
+         $file->{data}= \$data;
          push @$notes, '+rewrite interpreter';
       }
    }
    if ($interp =~ m,/env\z,) { # /usr/bin/env, request for interpreter from $PATH...
-      my ($name)= ($file->{data} =~ m,^#!\s*/\S+\s*(\S+),)
+      my ($name)= (${$file->{data}} =~ m,^#!\s*/\S+\s*(\S+),)
          or return;
       if (defined (my $path= $self->src_which($name))) {
          $self->add($path);
@@ -1235,7 +1236,7 @@ sub process_script_file($self, $file, $notes) {
    elsif ($interp =~ m,/(bash|ash|dash|sh)\z,) {
       $self->process_shell_file($file, $notes);
    }
-   elsif ($self->_has_rewrites && $file->{data} =~ $self->path_rewrite_regex) {
+   elsif ($self->_has_rewrites && ${$file->{data}} =~ $self->path_rewrite_regex) {
       warn "$file->{src_path} is a script referencing a rewritten path, but don't know how to process it\n";
       push @$notes, "+can't rewrite!";
    }
@@ -1252,12 +1253,12 @@ sub process_shell_file($self, $file, $notes) {
    if ($self->_has_rewrites) {
       my $rre= $self->path_rewrite_regex;
       # Scan the source for paths that need rewritten
-      if ($file->{data} =~ $rre) {
-         my ($interp_line, $body)= split "\n", $file->{data}, 2;
+      if (${$file->{data}} =~ $rre) {
+         my ($interp_line, $body)= split "\n", ${$file->{data}}, 2;
          # only replace path matches when following certain characters which
          # indicate the start of a path.
          $body =~ s/(?<=[ '"><\n#])$rre/$self->{path_rewrite_map}{$1}/ge;
-         $file->{data}= "$interp_line\n$body";
+         $file->{data}= \"$interp_line\n$body";
          push @$notes, '+rewrite paths';
       }
    }
@@ -1278,7 +1279,7 @@ sub _get_perl_script_deps($self, $file) {
       # If file appears to be a module, ensure module's own path root is in perl's @INC
       my @inc;
       if ($file->{src_path} =~ /.pm\z/) {
-         if ($file->{data} =~ /^(package|class) (\S+)/m) {
+         if (${$file->{data}} =~ /^(package|class) (\S+)/m) {
             my $path= ($1 =~ s,::,/,gr).'.pm';
             if (substr($file->{src_path}//'', -length $path) eq $path) {
                push @inc, substr($file->{src_path}, 0, -length $path);
@@ -1298,7 +1299,7 @@ sub _get_perl_script_deps($self, $file) {
 
 sub process_perl_file($self, $file, $notes) {
    $self->add($self->_get_perl_script_deps($file));
-   if ($self->_has_rewrites && $file->{data} =~ $self->path_rewrite_regex) {
+   if ($self->_has_rewrites && ${$file->{data}} =~ $self->path_rewrite_regex) {
       warn "$file->{src_path} is a script referencing a rewritten path, but don't know how to process it\n";
       push @$notes, "+can't rewrite!";
    }
@@ -1310,22 +1311,23 @@ sub _export_dir($self, $dir) {
 }
 
 sub _export_symlink($self, $file) {
-   if (!exists $file->{data}) {
-      exists $file->{data_path}
+   if (!defined $file->{data}) {
+      length $file->{data_path}
          or croak "Symlink must contain 'data' or 'data_path'";
-      defined( $file->{data}= readlink($file->{data_path}) )
+      defined( my $target= readlink($file->{data_path}) )
          or croak "readlink($file->{data_path}): $!";
+      $file->{data}= $target;
       # Symlink referenced a source file, so also export the symlink target
       # If target is relative and the data_path wasn't inside the src_abs tree, then not
       # sensible to export it.
-      if ($file->{data} !~ m,^/, and substr($file->{data_path}, 0, length $self->{src_abs}) ne $self->{src_abs}) {
+      if ($target !~ m,^/, and substr($file->{data_path}, 0, length $self->{src_abs}) ne $self->{src_abs}) {
          $self->log->debugf('Symlink %s read from %s which is outside %s; not adding symlink target %s',
-            $file->{name}, $file->{data_path}, $self->{src_abs}, $file->{data});
+            $file->{name}, $file->{data_path}, $self->{src_abs}, $target);
       }
       else {
          # make relative path absolute
-         my $target= $file->{data} =~ m,^/,? $file->{data}
-                   : (substr($file->{data_path}, length $self->{src_abs}) =~ s,[^/]*\z,,r) . $file->{data};
+         $target= (substr($file->{data_path}, length $self->{src_abs}) =~ s,[^/]*\z,,r) . $target
+            unless $target =~ m,^/,;
          my $abs_target= $self->_src_parent_abs_path($target);
          # Only queue it if it exists.  Exporting dangling symlinks is not an error
          if (defined $abs_target && lstat $self->{src_abs} . $abs_target) {
@@ -1419,15 +1421,6 @@ sub _export_whiteout($self, $file) {
    $self->_dst->add($file);
 }
 
-# _load_file(my $buffer, $filenme)
-sub _load_file {
-   open my $fh, "<:raw", $_[1]
-      or die "open($_[1]): $!";
-   my $size= -s $fh;
-   sysread($fh, ($_[0] //= ''), $size) == $size
-      or die "sysread($_[1], $size): $!";
-}
-
 sub _syswrite_all($tmp, $content_ref) {
    my $ofs= 0;
    again:
@@ -1438,15 +1431,6 @@ sub _syswrite_all($tmp, $content_ref) {
       else { die "syswrite($tmp): $!" }
    }
    $tmp->close or die "close($tmp): $!";
-}
-
-if ($have_file_map) {
-   eval q{
-      sub _load_or_map_file { File::Map::map_file($_[0], $_[1], "<") }
-      1;
-   } or die "$@";
-} else {
-   *_load_or_map_file= *_load_file;
 }
 
 sub _linux_major_minor($dev) {
