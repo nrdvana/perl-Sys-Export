@@ -8,6 +8,7 @@ use warnings;
 use experimental qw( signatures );
 use Carp;
 use Scalar::Util qw( blessed looks_like_number );
+use Sys::Export::LogAny '$log';
 use Exporter ();
 BEGIN {
    # Fcntl happily exports macros that don't exist, then fails at runtime.
@@ -21,6 +22,7 @@ our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
    isa_handle isa_pow2 round_up_to_pow2 round_up_to_multiple map_or_load_file filedata
    add skip find which finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
+   write_file_extent
    S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
    S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
 );
@@ -490,5 +492,61 @@ sub filedata {
    state $loaded= require Sys::Export::LazyFileData;
    Sys::Export::LazyFileData->new(@_);
 }
+
+=head2 write_file_extent
+
+  write_file_extent($fh, $file_addr, $size, $data_ref, $data_ofs, $description=undef);
+
+This utility method writes a full extent of a file, padding the supplied data with NUL bytes
+if needed.  It first seeks to C<$file_addr>, then writes a full C<$size> bytes from
+C<$$data_ref> from offset C<$data_ofs> if possible.
+If the length of the scalar in C<$$data_ref> is too short, this pads the write with NUL bytes.
+If C<$$data_ref> is especially large (>1MiB) it first performs a syswrite of as many whole pages
+of the data as possible, then pads the final page with NUL bytes on a second syswrite.
+
+You can skip the seek operation with an undefined C<$file_addr>, in which case it just syswrites
+from the current position of the file.
+
+C<$description> is for debug-logging purposes and can be C<undef>.
+
+If any syscall fails, or can't write the full size, this croaks.
+
+=cut
+
+sub write_file_extent($fh, $addr, $size, $data_ref, $ofs=0, $descrip=undef) {
+   $log->tracef("write %s at 0x%X-0x%X from buf size 0x%X%s",
+      $descrip//'blocks', $addr, $addr+$size, length($$data_ref), $ofs? sprintf(" ofs 0x%X", $ofs) : ''
+      ) if $log->is_trace;
+   return unless $size > 0;
+   if (defined $addr) {
+      my $reached= sysseek($fh, $addr, 0) // croak "sysseek($addr): $!";
+      $reached == $addr or croak "sysseek($addr) arrived at $reached instead of $addr";
+   }
+   $ofs //= 0;
+   my $avail= $data_ref? (length($$data_ref) - $ofs) : 0;
+   my $second;
+   # always write full size, padding with zeroes
+   if ($avail < $size) {
+      # If the scalar is particularly large, do two writes instead of reallocating the buffer.
+      if ($avail > 0x100000) {
+         my $first_write= $avail - ($avail & 0xFFF);
+         $second= pack 'a'.($size-$first_write), substr($$data_ref, $first_write);
+         $size= $first_write;
+      } else {
+         my $data= pack 'a'.$size, ($avail > 0? substr($$data_ref, $ofs) : '');
+         $data_ref= \$data;
+      }
+   }
+   my $wrote= syswrite($fh, $$data_ref, $size, $ofs);
+   croak "syswrite: $!" if !defined $wrote;
+   croak "Unexpected short write ($wrote != $size)" if $wrote != $size;
+   if (length $second) {
+      $wrote= syswrite($fh, $second);
+      croak "syswrite: $!" if !defined $wrote;
+      croak "Unexpected short write ($wrote != $size)" if $wrote != length($second);
+   }
+   return 1;
+}
+
 
 1;

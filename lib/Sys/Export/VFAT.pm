@@ -5,7 +5,7 @@ package Sys::Export::VFAT;
 use v5.26;
 use warnings;
 use experimental qw( signatures );
-use Fcntl qw( S_IFDIR S_ISDIR S_ISREG SEEK_SET SEEK_END );
+use Fcntl qw( S_IFDIR S_ISDIR S_ISREG );
 use Scalar::Util qw( blessed dualvar refaddr weaken );
 use List::Util qw( min max );
 use POSIX 'ceil';
@@ -27,7 +27,7 @@ use Exporter 'import';
 our @EXPORT_OK= qw( FAT12 FAT16 FAT32 ATTR_READONLY ATTR_HIDDEN ATTR_SYSTEM ATTR_ARCHIVE
   ATTR_VOLUME_ID ATTR_DIRECTORY is_valid_longname is_valid_shortname is_valid_volume_label
   build_shortname );
-use Sys::Export qw( :isa expand_stat_shorthand );
+use Sys::Export qw( :isa expand_stat_shorthand write_file_extent );
 use Sys::Export::VFAT::Geometry qw( FAT12 FAT16 FAT32 );
 require Sys::Export::VFAT::AllocationTable;
 require Sys::Export::VFAT::File;
@@ -130,7 +130,7 @@ sub _new_dir($self, $name, $parent, $file) {
 
 Name of file (or device) to write.  If the file exists it will be truncated before writing.
 If you want to write the filesystem amid existing data (like a partition table0, pass a file
-handle as C<out_fh>.
+handle as C<filehandle>.
 
 =attribute filehandle
 
@@ -474,9 +474,8 @@ sub finish($self) {
       open $fh, '+>', $self->filename
          or croak "open: $!";
    }
-   # check size by seeking to end
-   my $pos= sysseek($fh, 0, SEEK_END);
-   if ($pos < $geom->volume_offset + $geom->total_size) {
+   # check size
+   if (-s $fh < $geom->volume_offset + $geom->total_size) {
       truncate($fh, $geom->volume_offset + $geom->total_size)
          or croak "truncate: $!";
    }
@@ -492,26 +491,6 @@ sub _log_hexdump($buf) {
       for 0..ceil(length($buf) / 16);
 }
 
-sub _write_block_at($fh, $addr, $data_ref, $ofs, $size, $descrip=undef) {
-   $log->tracef("write %s at 0x%X-0x%X from buf size 0x%X%s",
-      $descrip//'blocks', $addr, $addr+$size, length($$data_ref), $ofs? sprintf(" ofs 0x%X", $ofs) : ''
-      ) if $log->is_trace;
-   sysseek($fh, $addr, SEEK_SET) or croak "sysseek($addr): $!";
-   $ofs //= 0;
-   my $avail= length($$data_ref) - $ofs;
-   $size //= $avail;
-   # always write full size, padding with zeroes
-   if ($avail < $size) {
-      my $data= $avail > 0? substr($$data_ref, $ofs) : '';
-      $data .= "\0" x ($size-length($data));
-      $data_ref= \$data;
-   }
-   my $wrote= syswrite($fh, $$data_ref, $size, $ofs);
-   croak "syswrite: $!" if !defined $wrote;
-   croak "Unexpected short write ($wrote != $size)" if $wrote != $size;
-   return 1;
-}   
-
 # This function depends on the file being pre-zeroed, which happens automatially for an empty
 # file that has just had its length changed by truncate().  This would write an invalid
 # filesystem if the handle is a block device with random leftover data in it.
@@ -521,13 +500,13 @@ sub _write_filesystem($self, $fh, $geom, $alloc) {
    # Pack the boot sector and other reserved sectors
    my $buf= $self->_pack_reserved_sectors;
    my $ofs= $self->volume_offset;
-   _write_block_at($fh, $ofs, \$buf, 0, $geom->reserved_size, 'reserved sectors');
+   write_file_extent($fh, $ofs, $geom->reserved_size, \$buf, 0, 'reserved sectors');
    $ofs += $geom->reserved_size;
    # Pack the allocation tables
    $buf= $self->_pack_allocation_table($alloc);
    # store a copy of this into each of the regions occupied by fats
    for (my $i= 0; $i < $geom->fat_count; $i++) {
-      _write_block_at($fh, $ofs, \$buf, 0, $geom->fat_size, "fat table $i");
+      write_file_extent($fh, $ofs, $geom->fat_size, \$buf, 0, "fat table $i");
       $ofs += $geom->fat_size;
    }
    # For FAT12/FAT16, write the root directory entries
@@ -537,7 +516,7 @@ sub _write_filesystem($self, $fh, $geom, $alloc) {
          if !$rootf->size || ($rootf->size & 31)
             || length ${$rootf->data} != $rootf->size
             || $rootf->size > $geom->root_dir_size;
-      _write_block_at($fh, $ofs, $rootf->data, 0, $geom->root_dir_size, 'root dir');
+      write_file_extent($fh, $ofs, $geom->root_dir_size, $rootf->data, 0, 'root dir');
    }
    # The files and dirs have all been assigned clusters by _optimize_geometry
    for my $cl (sort { $a <=> $b } keys $alloc->chains->%*) {
@@ -551,7 +530,7 @@ sub _write_filesystem($self, $fh, $geom, $alloc) {
       for (my $i= 0; $i < @$invlist; $i += 2) {
          my ($cl_start, $cl_lim)= @{$invlist}[$i, $i+1];
          my $size= ($cl_lim-$cl_start) * $geom->bytes_per_cluster;
-         _write_block_at($fh, $geom->get_cluster_device_offset($cl_start), $data, $data_ofs, $size);
+         write_file_extent($fh, $geom->get_cluster_device_offset($cl_start), $size, $data, $data_ofs);
          $data_ofs += $size;
       }
    }
