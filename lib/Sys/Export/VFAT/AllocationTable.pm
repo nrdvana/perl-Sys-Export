@@ -110,7 +110,7 @@ sub free_cluster_count($self) {
 
   $metadata= $self->get_chain($cluster_id);
 
-Returns the metadata associaed with the head cluster of a cluster chain.
+Returns the metadata associated with the head cluster of a cluster chain.
 Clusters which are not the heads of chains return nothing.
 
 =cut

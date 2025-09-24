@@ -122,7 +122,7 @@ subtest device_align_placement => sub {
       ok( $offset > 0, 'offset > 0' );
       is( $offset & ($align-1), 0, "TEST.DAT aligned to $align" );
       is( $offset2 & (($align*2)-1), 0, "TEST2.DAT aligned to ".($align*2) );
-      is( $f->offset, $offset2, 'reported location of TEST2.DAT' );
+      is( $f->device_offset, $offset2, 'reported location of TEST2.DAT' );
    }
 };
 
