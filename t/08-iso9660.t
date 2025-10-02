@@ -34,7 +34,11 @@ subtest empty_fs => sub {
    my $tmp= File::Temp->new;
    my $dst= Sys::Export::ISO9660->new($tmp);
    $dst->finish;
-   is( -s $tmp, 43008, 'minimal fs size' );
+   my $sectors= 16 # system
+      + 3 # Volume Descriptors (primary, secondary, terminator)
+      + 4 # 4x path table (LE, BE, Joliet LE, Joliet BE)
+      + 2;# root dir, Joliet root dir
+   is( -s $tmp, $sectors * 2048, 'minimal fs size' );
    note `$isoinfo -dJRf -i $tmp` if $isoinfo;
 };
 
@@ -47,9 +51,16 @@ Hello World
 
 Stuff and things.
 END
-   $dst->abstract_file($dst->add([ file => 'README.TXT', \$readme ]));
+   my $readme_file= $dst->add([ file => 'README.TXT', \$readme ]);
+   $dst->abstract_file($readme_file);
+   $dst->{default_time}= 946684800;
    $dst->finish;
-   is( -s $tmp, 45056, 'fs size with only README.TXT' );
+   my $sectors= 16 # system
+      + 3 # Volume Descriptors (primary, secondary, terminator)
+      + 4 # 4x path table (LE, BE, Joliet LE, Joliet BE)
+      + 2 # root dir, Joliet root dir
+      + 1;# README.txt content
+   is( -s $tmp, $sectors*2048, 'fs size with only README.TXT' );
    note `$isoinfo -d -i $tmp` if $isoinfo;
    `cp $tmp /tmp/README.iso && chmod go+r /tmp/README.iso`;
    subtest mount_fs => sub {

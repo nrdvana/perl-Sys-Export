@@ -22,7 +22,11 @@ use constant {
    FLAG_PROTECTION  => dualvar(0x10, 'FLAG_PROTECTION'),  # permissions
    FLAG_MULTIEXTENT => dualvar(0x80, 'FLAG_MULTIEXTENT'), # continued in another extent
    LBA_SECTOR_SIZE  => 2048,
+   LBA_SECTOR_POW2  => 11,
 };
+sub _sector_of($addr) { $addr >> LBA_SECTOR_POW2 }
+sub _remaining_sector_bytes($pos) { -$pos & (LBA_SECTOR_SIZE-1) }
+sub _round_to_whole_sector($len) { ($len + LBA_SECTOR_SIZE - 1) & ~(LBA_SECTOR_SIZE-1) }
 require Sys::Export::ISO9660::File;
 require Sys::Export::ISO9660::Directory;
 use Carp;
@@ -31,6 +35,7 @@ use Exporter 'import';
 our @EXPORT_OK= qw(
    FLAG_HIDDEN FLAG_DIRECTORY FLAG_ASSOCIATED FLAG_RECORD FLAG_PROTECTION FLAG_MULTIEXTENT
    is_valid_shortname is_valid_joliet_name remove_invalid_shortname_chars
+   LBA_SECTOR_SIZE LBA_SECTOR_POW2
 );
 
 =head1 SYNOPSIS
@@ -320,7 +325,7 @@ sub add($self, $spec) {
          !$ent->{file}? 'size=0 (empty file)'
          : $ent->{file}->is_dir? 'DIR'
          : sprintf("size=0x%X device_offset=0x%X",
-            $ent->{file}->size, $ent->{file}->offset)
+            $ent->{file}->size, $ent->{file}->device_offset//0)
       ))
       if $log->is_debug;
 
@@ -431,7 +436,7 @@ sub _choose_file_extents {
       } else {
          $max_seen= max($max_seen, $_->extent_lba + ceil($_->size / LBA_SECTOR_SIZE) - 1);
       }
-      $log->debug("File %s at LBA %s-%s",
+      $log->debugf("File %s at LBA %s-%s",
          $_->name, $_->extent_lba, $_->extent_lba + ceil($_->size / LBA_SECTOR_SIZE) - 1);
    };
    # Add the 4 path tables here
@@ -466,9 +471,13 @@ sub _calc_dir_sizes($self) {
       for ($dir->entries->@*) {
          my $is_dir= $_->{dir} || ($_->{file} && $_->{file}->is_dir);
          my $shortname_len= length $_->{shortname};
+         my $pos= $size;
          $size += 33 + (($shortname_len + ($is_dir? 0 : 2))|1);
+         $size += _remaining_sector_bytes($pos) if _sector_of($pos) != _sector_of($size); # round to next sector
+         $pos= $joliet;
          my $joliet_name= encode('UTF-16BE', $_->{name}, Encode::FB_CROAK | Encode::LEAVE_SRC);
          $joliet += 33 + (length($joliet_name)|1);
+         $joliet += _remaining_sector_bytes($pos) if _sector_of($pos) != _sector_of($joliet); # round to next sector
          # directory entries get added to a top-level "path table".
          # while we have the name available, calculate the size of those, too.
          if ($is_dir) {
@@ -478,13 +487,13 @@ sub _calc_dir_sizes($self) {
             $_->{path_table_jsize}= 8 + length($joliet_name);
          }
       }
-      $dir->{file}{size}= $size;
-      $dir->{joliet_file}{size}= $joliet;
+      $dir->{file}{size}= _round_to_whole_sector($size);
+      $dir->{joliet_file}{size}= _round_to_whole_sector($joliet);
    }
 }
 
 sub _pack_iso_datetime($epoch) {
-   my @t = gmtime($epoch // time);
+   my @t = gmtime($epoch);
    # year since 1900
    my $tz = 0; # UTC offset in 15min intervals
    return pack('C7', $t[5], $t[4]+1, $t[3], $t[2], $t[1], $t[0], $tz);
@@ -506,7 +515,7 @@ our @dirent_fields = (
   [ name_len      => 32, 1, 'C' ],
   # name_len and name appended after 33+
 );
-sub _encode_dirent($name, $file, $ent= {}) {
+sub _encode_dirent($self, $name, $file, $ent= {}) {
    my $name_len=     length $name;
    my $dir_len=      33 + ($name_len|1);
    my $extent_lba=   $ent->{extent_lba} // $file && $file->extent_lba // 0;
@@ -526,27 +535,35 @@ sub _encode_dirent($name, $file, $ent= {}) {
 
 sub _pack_directory($self, $dir) {
    # dot and dotdot
-   my $data= _encode_dirent("\x00", $dir->file);
-   my $joliet= _encode_dirent("\x00", $dir->joliet_file);
+   my $data= $self->_encode_dirent("\x00", $dir->file);
+   my $joliet= $self->_encode_dirent("\x00", $dir->joliet_file);
    if (my $parent= $dir->parent) {
-      $data .= _encode_dirent("\x01", $parent->file);
-      $joliet .= _encode_dirent("\x01", $parent->joliet_file);
+      $data .= $self->_encode_dirent("\x01", $parent->file);
+      $joliet .= $self->_encode_dirent("\x01", $parent->joliet_file);
    }
    # real entries
    for (sort { lc $a->name cmp lc $b->name } $dir->entries->@*) {
       my $is_dir= $_->{dir} || $_->{file}->is_dir;
       my $shortname= $_->{shortname} . (!$is_dir && ';1');
-      $data .= _encode_dirent($shortname, $_->{file}, $_);
+      my $pos= length $data;
+      $data .= $self->_encode_dirent($shortname, $_->{file}, $_);
+      # If it crossed a sector boundary, move it fully into the next sector
+      substr($data, $pos, 0, "\0"x _remaining_sector_bytes($pos))
+         if _sector_of($pos) != _sector_of(length $data);
       my $jname= encode('UTF-16BE', $_->{name}, Encode::FB_CROAK | Encode::LEAVE_SRC);
       my $jfile= $_->{dir}? $_->{dir}->joliet_file # live dir holds reference to joliet_file
          : $is_dir? $_->{joliet_file}              # dirent could also reference the joliet_file
          : $_->{file};                             # else it's a plain file with no alt encoding
-      $joliet .= _encode_dirent($jname, $jfile, $_);
+      $pos= length $joliet;
+      $joliet .= $self->_encode_dirent($jname, $jfile, $_);
+      # If it crossed a sector boundary, move it fully into the next sector
+      substr($joliet, $pos, 0, "\0"x _remaining_sector_bytes($pos))
+         if _sector_of($pos) != _sector_of(length $joliet);
    }
    # verify correct size
-   length $data == $dir->file->size
+   _round_to_whole_sector(length $data) == $dir->file->size
       or croak "BUG: encoded directory is ".length($data)." bytes but should be ".$dir->file->size;
-   length $joliet == $dir->joliet_file->size
+   _round_to_whole_sector(length $joliet) == $dir->joliet_file->size
       or croak "BUG: encoded joliet directory is ".length($data)." bytes but should be ".$dir->joliet_file->size;
    $dir->file->{data}= \$data;
    $dir->joliet_file->{data}= \$joliet;
@@ -561,7 +578,7 @@ sub _pack_directory($self, $dir) {
 sub _calc_path_table_size($self) {
    my @paths= ( [ $self->root, 0 ] );
    my $i= 0;
-   my ($size, $jsize)= (0, 0);
+   my ($size, $jsize)= (10, 10); # start with root dir, always 10 bytes
    while ($i < @paths) {
       my ($dir, $parent_id)= @{ $paths[$i++] };
       for my $ent ($dir->entries->@*) {
@@ -583,8 +600,10 @@ sub _calc_path_table_size($self) {
 sub _pack_path_tables($self) {
    # Need packed for both 8.3 filenames and Joliet filenames, and encoded both little-endian
    # and big-endian, for 4 total path tables.
-   my ($le, $be, $jle, $jbe)= ('','','','');
-   my @paths= ( [ $self->root, 0 ] );
+   my ($le, $be, $jle, $jbe);
+   $le= $jle= pack 'C C V v a2', 10, 0, $self->root->file->extent_lba, 1, '';
+   $be= $jbe= pack 'C C N n a2', 10, 0, $self->root->file->extent_lba, 1, '';
+   my @paths= ( [ $self->root, 1 ] );
    my $i= 0;
    my ($size, $jsize)= (0, 0);
    while ($i < @paths) {
@@ -612,7 +631,7 @@ sub _pack_path_tables($self) {
 }
 
 sub _pack_iso_volume_datetime($epoch) {
-   my @t = gmtime($epoch //= time); # UTC
+   my @t = gmtime($epoch); # UTC
    my $year = $t[5] + 1900;
    my $mon  = $t[4] + 1;
    my $mday = $t[3];
@@ -628,59 +647,63 @@ sub _pack_iso_volume_datetime($epoch) {
 }
 
 our @vol_desc_fields = (
-   # field_name  offset size pack-code default-value needs-encoded
-   [ type_code   =>   0, 1, 'C', 1 ],
-   [ std_id      =>   1, 5, 'A5', 'CD001' ],
-   [ version     =>   6, 1, 'C', 1 ],
-   #[ unused1     =>   7, 1, 'C', 0 ],
-   [ system_id   =>   8, 32, 'A32', '', 1 ],
-   [ volume_id   =>  40, 32, 'A32', '', 1 ],
-   #[ unused2     =>  72, 8, 'a8', '' ],
-   [ volume_space=>  80, 4, 'V' ],
-   [ volume_space=>  84, 4, 'N' ],
-   [ escape_sequences => 88, 32, 'a32', '' ],
-   [ vol_set_sz  => 120, 2, 'v', 1 ],
-   [ vol_set_sz  => 122, 2, 'n', 1 ],
-   [ seq_no      => 124, 2, 'v', 1 ],
-   [ seq_no      => 126, 2, 'n', 1 ],
-   [ blk_sz      => 128, 2, 'v', 2048 ],
-   [ blk_sz      => 130, 2, 'n', 2048 ],
-   [ path_sz     => 132, 4, 'V' ],
-   [ path_sz     => 136, 4, 'N' ],
-   [ path_le     => 140, 4, 'V' ],
-   [ path_le_opt => 144, 4, 'V', 0 ],
-   [ path_be     => 148, 4, 'N' ],
-   [ path_be_opt => 152, 4, 'N', 0 ],
-   [ root_dirent => 156, 34, 'a34' ],
-   [ vol_set_id  => 190, 128, 'A128', '', 1 ],
-   [ pub_id      => 318, 128, 'A128', '', 1 ],
-   [ prep_id     => 446, 128, 'A128', '', 1 ],
-   [ app_id      => 574, 128, 'A128', '', 1 ],
-   [ copy_id     => 702, 37, 'A37', '', 1 ],
-   [ abs_id      => 739, 37, 'A37', '', 1 ],
-   [ bib_id      => 776, 37, 'A37', '', 1 ],
-   [ creation_ts     => 813, 17, 'a17' ],
-   [ modification_ts => 830, 17, 'a17' ],
-   [ expiration_ts   => 847, 17, 'a17', '0'x16 ],
-   [ effective_ts    => 864, 17, 'a17' ],
-   [ file_struct => 881, 1, 'C', 1 ],
-   #[ unused3     => 882, 1, 'C', 0 ],
+   # field_name | offset | size | pack-code | default
+   [ type_code        => 0x000,   1, 'C',  1 ],
+   [ std_id           => 0x001,   5, 'A', 'CD001' ],
+   [ version          => 0x006,   1, 'C',  1 ],
+   #[ unused1         => 0x007,   1, 'C',   0 ],
+   [ system_id        => 0x008,  32, 'E', '' ], # system which uses sectors 0-15
+   [ volume_id        => 0x028,  32, 'E', '' ],
+   #[ unused2         => 0x048,   8, 'a8',  '' ],
+   [ volume_space     => 0x050,   4, 'V' ],
+   [ volume_space     => 0x054,   4, 'N' ],
+   [ escape_sequences => 0x058,  32, 'a', '' ],
+   [ vol_set_sz       => 0x078,   2, 'v', 1 ],
+   [ vol_set_sz       => 0x07A,   2, 'n', 1 ],
+   [ seq_no           => 0x07C,   2, 'v', 1 ],
+   [ seq_no           => 0x07E,   2, 'n', 1 ],
+   [ blk_sz           => 0x080,   2, 'v', 2048 ],
+   [ blk_sz           => 0x082,   2, 'n', 2048 ],
+   [ path_sz          => 0x084,   4, 'V' ],
+   [ path_sz          => 0x088,   4, 'N' ],
+   [ path_le          => 0x08C,   4, 'V' ],
+   [ path_le_opt      => 0x090,   4, 'V', 0 ],
+   [ path_be          => 0x094,   4, 'N' ],
+   [ path_be_opt      => 0x098,   4, 'N', 0 ],
+   [ root_dirent      => 0x09C,  34, 'a' ],
+   [ vol_set_id       => 0x0BE, 128, 'E', '' ],
+   [ pub_id           => 0x13E, 128, 'E', '' ],
+   [ prep_id          => 0x1BE, 128, 'E', '' ],
+   [ app_id           => 0x23E, 128, 'E', '' ],
+   [ copy_id          => 0x2BE,  37, 'E', '' ],
+   [ abs_id           => 0x2E3,  37, 'E', '' ],
+   [ bib_id           => 0x308,  37, 'E', '' ],
+   [ creation_ts      => 0x32D,  17, 'a', '0'x16 ],
+   [ modification_ts  => 0x33E,  17, 'a', '0'x16 ],
+   [ expiration_ts    => 0x34F,  17, 'a', '0'x16 ],
+   [ effective_ts     => 0x360,  17, 'a', '0'x16 ],
+   [ file_struct      => 0x371,   1, 'C', 1 ],
+   #[ unused3         => 0x372,   1, 'C', 0 ],
 );
 sub _append_pack_args($pack, $vals, $ofs, $fields, $attrs, $charset=undef) {
    for (@$fields) {
-      push @$pack, '@'.($ofs+$_->[1]).$_->[3];
-      my $val= $attrs->{$_->[0]} // $_->[4]
-         // croak "No value supplied for $_->[0], and no default";
-      if ($_->[5] && $charset) {
-         # If it is space-padded, pad with encoded spaces
-         if ($_->[3] =~ /^A([0-9]+)/) {
-            $val= substr(encode($charset, $val.' 'x$1, Encode::FB_CROAK), 0, $1);
-         } else {
-            $val= encode($charset, $val, Encode::FB_CROAK);
+      my ($name, $field_ofs, $size, $code, $default)= @$_;
+      my $val= $attrs->{$name} // $default
+         // croak "No value supplied for $name, and no default";
+      if ($code eq 'E') { # 'E' is a virtual code I'm using to mean "Encoded space-padded string"
+         if ($charset) {
+            # pad with encoded spaces
+            $val= substr(encode($charset, $val.(' 'x$size), Encode::FB_CROAK), 0, $size);
          }
-      } elsif (utf8::is_utf8($val)) {
-         utf8::downgrade($val, 1) or croak "Wide character supplied for attribute $_->[0]";
+         $code= 'A';
       }
+      if (uc $code eq 'A') {
+         utf8::is_utf8($val) or utf8::downgrade($val, 1)
+            or croak "Wide character supplied for attribute $name";
+         carp "$name will be truncated" if length($val) > $size;
+         $code .= $size;
+      }
+      push @$pack, '@'.($ofs+$field_ofs).$code;
       push @$vals, $val;
    }
 }
