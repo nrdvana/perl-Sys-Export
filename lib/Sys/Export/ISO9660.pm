@@ -111,62 +111,102 @@ sub root { $_[0]{root} }
 
 =attribute volume_label
 
-Name for the filesystem image
+Text label for the filesystem image, limited to uppercase letters, digits, and underscore.
 
 =attribute volume_set
 
 Name for a multi-volume collection
 
+=attribute system
+
+Name of the system for which the filesystem is intended.  (i.e. the system what will be
+interpreting sectors 0..15 which are defined as "system" sectors)  Limited to uppercase
+ASCII.
+
 =attribute publisher
 
-Name of entity publishing this image
+Text label (or reference to a File object in the root directory) of the entity publishing this
+image.  Limited to uppercase ASCII.
+
+=attribute preparer
+
+Text label (or reference to a File object in the root directroy) of the entity writing this
+image.  Defaults to C<< PERL SYS::EXPORT::ISO9660 $VERSION >>
 
 =attribute application
 
-Name of application for which this image is used
+Text label (or reference to a File object in the root directory) of the application for which
+this image is used.  Limited to uppercase ASCII.
 
-=attribute system
+=attribute copyright_file
 
-Name of the system for which the filesystem is intended
+Name of a file (or reference to File object) in the root directory where a copyright is stored.
 
-=attribute path_to_copyright
+=attribute abstract_file
 
-Path within the encoded filesystem where a copyright file can be found.  Must use short names
-and contain ';1' suffix on filename and be no more than 37 characters.
+Name of a file (or reference to File object) in the root directory where a copyright is stored.
 
-=attribute path_to_abstract
+=attribute bibliographic_file
 
-Path within the encoded filesystem where an abstract can be found.
-Same name rules as L</path_to_copyright>.
-
-=attribute path_to_bibliographic
-
-Path within the encoded filesystem where bibliographic information can be found.
-Same name rules as L</path_to_copyright>.
+Name of a file (or reference to File object) in the root directory where bibliographic
+information is stored.
 
 =cut
 
-for (qw( volume_label system )) {
-   eval "sub $_ { \@_ > 1? (\$_[0]{$_}= _coerce_label(\$_[1])) : \$_[0]{$_} } 1" or die "$@";
+sub volume_label {
+   @_ > 1? ($_[0]{volume_label}= _validate_volume_label($_[1])) : $_[0]{volume_label}
 }
-for (qw( volume_set publisher application )) {
-   eval "sub $_ { \@_ > 1? (\$_[0]{$_}= _coerce_meta_id(\$_[1])) : \$_[0]{$_} } 1" or die "$@";
-}
-for (qw( copyright_file abstract_file bibliographic_file )) {
-   eval "sub $_ { \@_ > 1? (\$_[0]{$_}= \$_[1]) : \$_[0]{$_} } 1" or die "$@";
+sub _validate_volume_label($label) {
+   $label= uc $label;
+   croak "Volume label must be 0..32 uppercase letters, digits, underscore, or space characters"
+      unless $label =~ /^[A-Z0-9_ ]{0,32}\z/;
+   $label;
 }
 
-sub _coerce_label($label) {
-   $label= uc($label);
-   $label =~ /^[A-Z0-9_ ]{0,32}\z/x
-      or croak "Labels must be <= 32 uppercase letters, digits, underscore or space";
+sub system {
+   @_ > 1? ($_[0]{system}= _validate_system_id($_[1])) : $_[0]{system}
+}
+sub _validate_system_id($label) {
+   $label= uc $label;
+   croak "System ID must be 0..32 uppercase ASCII characters (excluding several punctuation)"
+      unless $label =~ m{^ [- !"%&'()*+,./0-9:;<=>?A-Z_]{0,32} \z}x;
    $label;
 }
-sub _coerce_meta_id($label) {
-   $label= uc($label);
-   $label =~ /^[A-Z0-9_ ]{0,128}\z/x
-      or croak "Metadata IDs must be <= 128 uppercase letters, digits, underscore or space";
+
+sub volume_set {
+   @_ > 1? ($_[0]{volume_set}= _validate_volume_set_id($_[1])) : $_[0]{volume_set}
+}
+sub _validate_volume_set_id($label) {
+   $label= uc $label;
+   croak "Volume Set ID must be 0..64 uppercase letters, digits, underscore, or space characters"
+      unless $label =~ /^[A-Z0-9_ ]{0,64}\z/; # 128, but Joliet encodes as UTF16
    $label;
+}
+
+for (qw( publisher preparer application )) {
+   eval "sub $_ { \@_ > 1? (\$_[0]{$_}= _validate_meta_label(\$_[1], '$_')) : \$_[0]{$_} } 1" or die "$@";
+}
+sub _validate_meta_label($x, $field='Metadata label') {
+   # Metadata labels can either be a text label of the "a-characters" (most of ascii)
+   # or a file object to refer to a file containing the data.
+   unless (blessed $x && $x->can('extent_lba')) {
+      $x= uc $x;
+      croak "$field must be 0..64 uppercase ASCII characters (excluding some punctuation)"
+         unless $x =~ m{^ [- !"%&'()*+,./0-9:;<=>?A-Z_]{0,64} \z}x;
+   }
+   $x;
+}
+
+for (qw( copyright_file abstract_file bibliographic_file )) {
+   eval "sub $_ { \@_ > 1? (\$_[0]{$_}= _validate_meta_filename(\$_[1], '$_')) : \$_[0]{$_} } 1" or die "$@";
+}
+sub _validate_meta_filename($x, $field='Metadata filename') {
+   unless (blessed $x && $x->can('extent_lba')) {
+      $x= uc $x;
+      croak "$field must be a valid 8.3 filename"
+         unless $x =~ m{^ [A-Z0-9_]{1,8} (\.[A-Z0-9_]{0,3})? (;[0-9]+)? \z}x;
+   }
+   $x;
 }
 
 =export is_valid_shortname
@@ -258,8 +298,12 @@ sub add($self, $spec) {
    my $path= $spec->{uname} // decode('UTF-8', $spec->{name}, Encode::FB_CROAK | Encode::LEAVE_SRC);
    $path =~ s,^/,,; # remove leading slash, if any
 
+   croak "ISO9660 has a max path length of 255 (253 with ';1' version suffix), at '$path'"
+      if length($path) > 253;
    my @path= grep length, split '/', $path;
    my $leaf= pop @path;
+   croak "ISO9660 has a max subdirectory depth of 7, at '$path'"
+      if @path > 7; # It's documented as 8, but includes the root directory
 
    # Walk through the tree based on the case-folded path
    my $parent= $self->root;
@@ -343,6 +387,7 @@ You may get exceptions during this call if there isn't a way to write your files
 =cut
 
 sub finish($self) {
+   $self->{default_time} //= time;
    # Find out the size of every directory, and the path tables
    $self->_calc_dir_sizes;
    $self->_calc_path_table_size;
@@ -525,7 +570,7 @@ sub _encode_dirent($self, $name, $file, $ent= {}) {
       $dir_len, $ent->{ext_attr_len} // 0,
       $extent_lba, $extent_lba,
       $size, $size,
-      _pack_iso_datetime($ent->{mtime} // $file && $file->mtime // time),
+      _pack_iso_datetime($ent->{mtime} // $file && $file->mtime // $self->{default_time}),
       $ent->{flags} // $file && $file->flags // 0,
       $ent->{unit_size} // 0,
       $ent->{gap_size} // 0,
@@ -709,25 +754,32 @@ sub _append_pack_args($pack, $vals, $ofs, $fields, $attrs, $charset=undef) {
 }
 
 sub _pack_volume_descriptor($self, $attrs) {
+   my $is_joliet= ($attrs->{type_code}//0) == 2;
+   # The pub_id, prep_id, and app_id fields can either be literal text, or they can be a
+   # reference to a file in the root dir by starting with a '_' character.
+   my $maybe_file_ref= sub($thing) {
+      return '_'.$self->_get_metadata_filename($thing, $is_joliet)
+         if blessed($thing) && $thing->can('extent_lba');
+      return $thing;
+   };
    $attrs->{system_id}    //= $self->system // uc($^O);
    $attrs->{volume_id}    //= $self->volume_label // 'CDROM';
    $attrs->{volume_space} //= $self->{max_used_lba}+1;
    $attrs->{path_sz}      //= $attrs->{path_le_file}->size;
    $attrs->{path_le}      //= $attrs->{path_le_file}->extent_lba;
    $attrs->{path_be}      //= $attrs->{path_be_file}->extent_lba;
-   $attrs->{root_dirent}  //= _encode_dirent("\0", $attrs->{root_file});
-   $attrs->{creation_ts}     //= _pack_iso_volume_datetime($attrs->{btime});
-   $attrs->{modification_ts} //= _pack_iso_volume_datetime($attrs->{mtime});
-   $attrs->{effective_ts}    //= _pack_iso_volume_datetime(time);
-   $attrs->{vol_set_id}   //= $self->volume_set // $self->volume_label;
-   $attrs->{pub_id}       //= $self->publisher;
-   $attrs->{prep_id}      //= __PACKAGE__.' '.$VERSION;
-   $attrs->{app_id}       //= $self->application;
+   $attrs->{root_dirent}  //= $self->_encode_dirent("\0", $attrs->{root_file});
+   $attrs->{creation_ts}     //= _pack_iso_volume_datetime($attrs->{btime} // $self->{default_time});
+   $attrs->{modification_ts} //= _pack_iso_volume_datetime($attrs->{mtime} // $self->{default_time});
+   #$attrs->{effective_ts}    //= _pack_iso_volume_datetime($self->{default_time});
    # Find the filenames of the metadata files
-   my $is_joliet= ($attrs->{type_code}//0) == 2;
-   $attrs->{copy_id} //= _get_metadata_filename($self, $self->copyright_file, $is_joliet);
-   $attrs->{abs_id}  //= _get_metadata_filename($self, $self->abstract_file, $is_joliet);
-   $attrs->{bib_id}  //= _get_metadata_filename($self, $self->bibliographic_file, $is_joliet);
+   $attrs->{vol_set_id}   //= $self->volume_set;
+   $attrs->{pub_id}       //= $maybe_file_ref->($self->publisher);
+   $attrs->{prep_id}      //= $maybe_file_ref->($self->preparer) // "PERL SYS::EXPORT::ISO9660 $VERSION";
+   $attrs->{app_id}       //= $maybe_file_ref->($self->application);
+   $attrs->{copy_id}      //= $self->_get_metadata_filename($self->copyright_file, $is_joliet);
+   $attrs->{abs_id}       //= $self->_get_metadata_filename($self->abstract_file, $is_joliet);
+   $attrs->{bib_id}       //= $self->_get_metadata_filename($self->bibliographic_file, $is_joliet);
 
    my (@pack, @vals);
    _append_pack_args(\@pack, \@vals, 0, \@vol_desc_fields, $attrs, $is_joliet? 'UTF16-BE' : undef);
