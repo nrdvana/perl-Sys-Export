@@ -209,6 +209,17 @@ sub _validate_meta_filename($x, $field='Metadata filename') {
    $x;
 }
 
+=attribute default_time
+
+This unix timestamp will be used for any date field that wasn't specified elsewhere.  If not set
+when C</finalize> is called, it will default to the current time().
+
+=cut
+
+sub default_time {
+   @_ > 1? ($_[0]{default_time}= $_[1]) : $_[0]{default_time}
+}
+
 =export is_valid_shortname
 
 Returns true if string meets the very restricted 8.3 notation of a file, with the added

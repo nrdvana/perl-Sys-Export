@@ -44,7 +44,11 @@ subtest empty_fs => sub {
 
 subtest readme_fs => sub {
    my $tmp= File::Temp->new;
-   my $dst= Sys::Export::ISO9660->new(filename => $tmp, volume_label => 'TESTVOL');
+   my $dst= Sys::Export::ISO9660->new(
+      filename => $tmp,
+      volume_label => 'TESTVOL',
+      default_time => 946684800,
+   );
    my $readme= <<END;
 Hello World
 -----------
@@ -53,7 +57,6 @@ Stuff and things.
 END
    my $readme_file= $dst->add([ file => 'README.TXT', \$readme ]);
    $dst->abstract_file($readme_file);
-   $dst->{default_time}= 946684800;
    $dst->finish;
    my $sectors= 16 # system
       + 3 # Volume Descriptors (primary, secondary, terminator)
