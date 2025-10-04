@@ -71,11 +71,11 @@ True if the flags include FLAG_DIRECTORY
 =cut
 
 sub name          { $_[0]{name} }
-sub size          { $_[0]{size} }
-sub data          { $_[0]{data} }
-sub mtime         { $_[0]{mtime} }
-sub flags         { $_[0]{flags} }
-sub extent_lba    { $_[0]{extent_lba} }
+sub size          { @_ > 1? ($_[0]{size}= $_[1]) : $_[0]{size} }
+sub data          { @_ > 1? ($_[0]{data}= $_[1]) : $_[0]{data} }
+sub mtime         { @_ > 1? ($_[0]{mtime}= $_[1]) : $_[0]{mtime} }
+sub flags         { @_ > 1? ($_[0]{flags}= $_[1]) : $_[0]{flags} }
+sub extent_lba    { @_ > 1? ($_[0]{extent_lba}= $_[1]) : $_[0]{extent_lba} }
 sub device_offset { $_[0]{extent_lba} && $_[0]{extent_lba} << 11 }
 sub is_dir        { ($_[0]{flags}||0) & Sys::Export::ISO9660::FLAG_DIRECTORY() }
 
