@@ -8,7 +8,7 @@ use warnings;
 use experimental qw( signatures );
 use Fcntl qw( S_IFDIR S_ISDIR S_ISREG SEEK_SET SEEK_END );
 use Scalar::Util qw( blessed dualvar refaddr weaken );
-use List::Util qw( min max );
+use List::Util qw( min max sum );
 use Time::HiRes 'time';
 use POSIX 'ceil';
 use Sys::Export qw( :isa write_file_extent expand_stat_shorthand );
@@ -23,6 +23,15 @@ use constant {
    FLAG_MULTIEXTENT => dualvar(0x80, 'FLAG_MULTIEXTENT'), # continued in another extent
    LBA_SECTOR_SIZE  => 2048,
    LBA_SECTOR_POW2  => 11,
+   BOOT_X86 => dualvar(   0, 'x86'),
+   BOOT_PPC => dualvar(   1, 'PowerPC'),
+   BOOT_MAC => dualvar(   2, 'Mac'),
+   BOOT_EFI => dualvar(0xEF, 'EFI'),
+   EMU_NONE      => dualvar(0, 'EMU_NONE'),
+   EMU_FLOPPY12  => dualvar(1, 'EMU_FLOPPY12'),
+   EMU_FLOPPY144 => dualvar(2, 'EMU_FLOPPY144'),
+   EMU_FLOPPY288 => dualvar(3, 'EMU_FLOPPY288'),
+   EMU_HDD       => dualvar(4, 'EMU_HDD'),
 };
 sub _sector_of($addr) { $addr >> LBA_SECTOR_POW2 }
 sub _remaining_sector_bytes($pos) { -$pos & (LBA_SECTOR_SIZE-1) }
@@ -35,7 +44,8 @@ use Exporter 'import';
 our @EXPORT_OK= qw(
    FLAG_HIDDEN FLAG_DIRECTORY FLAG_ASSOCIATED FLAG_RECORD FLAG_PROTECTION FLAG_MULTIEXTENT
    is_valid_shortname is_valid_joliet_name remove_invalid_shortname_chars
-   LBA_SECTOR_SIZE LBA_SECTOR_POW2
+   LBA_SECTOR_SIZE LBA_SECTOR_POW2 BOOT_X86 BOOT_PPC BOOT_MAC BOOT_EFI
+   EMU_NONE EMU_FLOPPY12 EMU_FLOPPY144 EMU_FLOPPY288 EMU_HDD
 );
 
 =head1 SYNOPSIS
@@ -55,9 +65,9 @@ our @EXPORT_OK= qw(
 
 =constructor new
 
-  $fat= Sys::Export::VFAT->new($filename_or_handle);
-  $fat= Sys::Export::VFAT->new(%attrs);
-  $fat= Sys::Export::VFAT->new(\%attrs);
+  $fat= Sys::Export::ISO9660->new($filename_or_handle);
+  $fat= Sys::Export::ISO9660->new(%attrs);
+  $fat= Sys::Export::ISO9660->new(\%attrs);
 
 This takes a list of attributes as a hashref or key/value list.  If there is exactly one
 argument, it is treated as the filename attribute.
@@ -89,7 +99,7 @@ sub _new_file($self, $name, %attrs) {
 =attribute filename
 
 Name of file (or device) to write.  If the file exists it will be truncated before writing.
-If you want to write the filesystem amid existing data (like a partition table0, pass a file
+If you want to write the filesystem amid existing data (like a partition table), pass a file
 handle as C<filehandle>.
 
 =attribute filehandle
@@ -207,6 +217,109 @@ sub _validate_meta_filename($x, $field='Metadata filename') {
          unless $x =~ m{^ [A-Z0-9_]{1,8} (\.[A-Z0-9_]{0,3})? (;[0-9]+)? \z}x;
    }
    $x;
+}
+
+=attribute boot_catalog
+
+The El Torrito catalog of boot options.  See L</add_boot_catalog_entry> for a convenient way to
+modify this structure.  It starts undefined until the first entry is added.  If undefined, no
+boot catalog is written into the ISO image.
+
+Structure:
+
+  {
+    system_id => $ascii32,
+    boot_id   => $ascii32,
+    sections  => [
+      {
+        platform_id => # BOOT_X86, BOOT_PPC, BOOT_MAC, BOOT_EFI
+        id_string   => $ascii28,
+        entries => [
+          {
+            bootable     => # 0 (false) or 0x88 (true)
+            media_type   => # EMU_NONE, EMU_FLOPPY12, EMU_FLOPPY144, EMU_FLOPPY288, EMU_HDD
+            load_segment => # 0x0000=no-emul, 0x07C0=floppy
+            system_type  => # MBR partition type byte, 0xEF for EFI ESP
+            file         => # ISO9660::File object, holds extent_lba and size and data
+          },
+          ...
+        ]
+      },
+      ...
+    ],
+    file => $iso966o_file_obj, # lazy-built
+  }
+
+=cut
+
+sub boot_catalog { $_[0]{boot_catalog} }
+
+=method add_boot_catalog_entry
+
+  my $entry= $iso->add_boot_catalog_entry(
+    platform_id       => # BOOT_X86, BOOT_PPC, BOOT_MAC, BOOT_EFI
+    section_id        => # ASCII name of section
+    bootable          => # boolean, default true
+    media_type        => # EMU_NONE, EMU_FLOPPY12, EMU_FLOPPY144, EMU_FLOPPY288, EMU_HDD
+    load_segment      => # address for floppy emulation, default 0x7C0 for floppy types
+    system_type       => # MBR partition type code, default 0xEF for EFI
+    file              => # ISO9660::File object
+    extent_lba        => # initialize file->extent_lba
+    size              => # initialize file->size
+    data              => # initialize file->data
+  );
+
+=cut
+
+sub add_boot_catalog_entry($self, %attrs) {
+   my ($platform_id, $section_id, $bootable, $media_type, $load_segment, $system_type)
+      = delete @attrs{qw( platform_id section_id bootable media_type load_segment system_type )};
+   my ($file, $extent_lba, $size, $data)
+      = delete @attrs{qw( file extent_lba size data )};
+   croak "Unknown attribute ".join(', ', keys %attrs)
+      if keys %attrs;
+   croak "require platform_id"
+      unless defined $platform_id;
+
+   $file //= $self->_new_file("(boot image for platform $platform_id)");
+   $file->extent_lba($extent_lba) if defined $extent_lba;
+   $file->size($size) if defined $size;
+   $file->data($data) if defined $data;
+
+   $bootable //= 0x88; # bootable by default
+   $media_type //= $platform_id == BOOT_EFI? EMU_NONE
+                 # If boot loader is larger than a floppy, probably doesn't rely on emulation
+                 : ($file->size//0) > 1474560? EMU_NONE
+                 # standard floppy emulation
+                 : EMU_FLOPPY144;
+   # load segment is the memory address BIOS loads the image into before running the boot loader
+   $load_segment //= $media_type == EMU_NONE? 0 : 0x7C0;
+   # System type for floppy isn't relevant, and HDD emulation would have its own MBR with
+   # the system types defined.
+   $system_type //= $platform_id == BOOT_EFI? 0xEF : 0;
+   $section_id //= $platform_id == BOOT_X86 ? 'x86'
+                 : $platform_id == BOOT_PPC ? 'PowerPC'
+                 : $platform_id == BOOT_MAC ? 'Mac'
+                 : $platform_id == BOOT_EFI ? 'UEFI'
+                 : "Platform $platform_id";
+
+   my $sections= $self->{boot_catalog}{sections} //= [];
+   my ($sec)= grep $_->{platform_id} == $platform_id && $_->{id_string} eq $section_id, @$sections;
+   if (!defined $sec) {
+      push @$sections, ($sec= {
+         platform_id => $platform_id,
+         id_string   => $section_id,
+         entries     => []
+      });
+   }
+   push $sec->{entries}->@*, {
+      bootable     => $bootable,
+      media_type   => $media_type,
+      load_segment => $load_segment,
+      system_type  => $system_type,
+      file         => $file,
+   };
+   return $sec->{entries}[-1];
 }
 
 =attribute default_time
@@ -400,6 +513,7 @@ You may get exceptions during this call if there isn't a way to write your files
 sub finish($self) {
    $self->{default_time} //= time;
    # Find out the size of every directory, and the path tables
+   $self->_calc_boot_catalog_size if $self->boot_catalog && $self->boot_catalog->{sections};
    $self->_calc_dir_sizes;
    $self->_calc_path_table_size;
    # Choose LBA extents for everything
@@ -410,7 +524,7 @@ sub finish($self) {
 
    my $fh= $self->filehandle;
    if (!$fh) {
-      defined $self->filename or croak "Must set filename or out_fh attributes";
+      defined $self->filename or croak "Must set filename or filehandle attributes";
       open $fh, '+>', $self->filename
          or croak "open: $!";
    }
@@ -435,18 +549,24 @@ sub _write_file($fh, $file) {
 
 # Write all descriptors, path tables, directories, and any file with ->{data}.
 sub _write_filesystem($self, $fh) {
-   # Write Primary Volume Descriptor
    my $lba= 16;
+   my $boot_catalog= $self->boot_catalog && $self->boot_catalog->{file};
+   # Write boot catalog if present
+   write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
+      \$self->_pack_boot_catalog_descriptor)
+      if $boot_catalog;
+   # Write Primary Volume Descriptor
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
       \$self->_pack_primary_volume_descriptor);
    # Write Secondary Volume Descriptor (Joliet)
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
       \$self->_pack_joliet_volume_descriptor);
-   # Write Boot Record descriptors
-   # ...
    # Volume Set Terminator
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE, \"\xFFCD001\x01");
-   
+
+   # Boot catalog
+   _write_file($fh, $boot_catalog) if $boot_catalog;
+
    # Write path tables
    _write_file($fh, $_) for $self->{path_tables}->@{qw( le be jle jbe )};
 
@@ -467,9 +587,6 @@ sub _write_filesystem($self, $fh) {
    }
 }
 
-# TODO
-sub _boot_record_descriptor_count { 0 }
-
 # Assign extent_lba to every file where it wasn't already declared.
 # This assumes we have an open-ended number of free sectors.
 # ISOHybrid calls this with all the files owned by VFAT set to extent_lba = -1 so that
@@ -479,11 +596,12 @@ sub _boot_record_descriptor_count { 0 }
 sub _choose_file_extents {
    my $self= shift;
    # Sectors 0-15 are reserved
+   # one sector for boot catalog descriptor, if used
    # one sector for Primary Volume Descriptor
    # one sector for Secondary Volume Descriptor
-   # Boot Record Descriptors,
    # and a Volume Descriptor Set Terminator
-   my $lba= 16 + 1 + 1 + $self->_boot_record_descriptor_count + 1;
+   my $boot_catalog= $self->boot_catalog;
+   my $lba= 16 + ($boot_catalog? 1 : 0) + 1 + 1 + 1;
    my $max_seen= 0;
    my $assign_lba= sub {
       if (!defined $_->extent_lba) {
@@ -495,6 +613,14 @@ sub _choose_file_extents {
       $log->debugf("File %s at LBA %s-%s",
          $_->name, $_->extent_lba, $_->extent_lba + ceil($_->size / LBA_SECTOR_SIZE) - 1);
    };
+
+   if ($boot_catalog) {
+      &$assign_lba for $boot_catalog->{file};
+      for my $sec ($boot_catalog->{sectons}->@*) {
+         &$assign_lba for map $_->{file}, $sec->{entries}->@*;
+      }
+   }
+
    # Add the 4 path tables here
    &$assign_lba for $self->{path_tables}->@{qw( le be jle jbe )};
    # Add the directories here
@@ -741,6 +867,9 @@ our @vol_desc_fields = (
    [ file_struct      => 0x371,   1, 'C', 1 ],
    #[ unused3         => 0x372,   1, 'C', 0 ],
 );
+
+# Given fields and an offset, add all the pack args to the first 2 params.
+# The optional '$charset' performs character encoding on any field of type 'E'.
 sub _append_pack_args($pack, $vals, $ofs, $fields, $attrs, $charset=undef) {
    for (@$fields) {
       my ($name, $field_ofs, $size, $code, $default)= @$_;
@@ -764,6 +893,30 @@ sub _append_pack_args($pack, $vals, $ofs, $fields, $attrs, $charset=undef) {
    }
 }
 
+# Helper for packing a single list of fields in one function call
+sub _pack_fields($field_array, $attrs, $charset=undef) {
+   my (@pack, @vals);
+   _append_pack_args(\@pack, \@vals, 0, $field_array, $attrs, $charset);
+   pack join(' ', @pack), @vals;
+}
+
+sub _pack_primary_volume_descriptor($self, $attrs={}) {
+   $attrs->{root_file}= $self->root->file;
+   $attrs->{path_le_file}= $self->{path_tables}{le};
+   $attrs->{path_be_file}= $self->{path_tables}{be};
+   $self->_pack_volume_descriptor($attrs);
+}
+
+sub _pack_joliet_volume_descriptor($self, $attrs={}) {
+   $attrs->{type_code}= 2;
+   $attrs->{escape_sequences} = "%/E"; # Level 3 of Joliet, UCS-2BE
+   $attrs->{root_file}= $self->root->joliet_file;
+   $attrs->{path_le_file}= $self->{path_tables}{jle};
+   $attrs->{path_be_file}= $self->{path_tables}{jbe};
+   $self->_pack_volume_descriptor($attrs);
+}
+
+# Packs a primary or secondar volume descriptor
 sub _pack_volume_descriptor($self, $attrs) {
    my $is_joliet= ($attrs->{type_code}//0) == 2;
    # The pub_id, prep_id, and app_id fields can either be literal text, or they can be a
@@ -792,13 +945,12 @@ sub _pack_volume_descriptor($self, $attrs) {
    $attrs->{abs_id}       //= $self->_get_metadata_filename($self->abstract_file, $is_joliet);
    $attrs->{bib_id}       //= $self->_get_metadata_filename($self->bibliographic_file, $is_joliet);
 
-   my (@pack, @vals);
-   _append_pack_args(\@pack, \@vals, 0, \@vol_desc_fields, $attrs, $is_joliet? 'UTF16-BE' : undef);
-   pack join(' ', @pack), @vals;
+   return _pack_fields(\@vol_desc_fields, $attrs, $is_joliet? 'UTF16-BE' : undef);
 }
 
 sub _get_metadata_filename($self, $spec, $is_joliet) {
    my $ent;
+   # Find the root directory entry which refers to this file
    if (blessed($spec) && $spec->can('extent_lba')) { # file object
       ($ent)= grep $_->{file} == $spec, $self->root->entries->@*
          or croak "Can't find ".$spec->name." in root directory";
@@ -806,23 +958,96 @@ sub _get_metadata_filename($self, $spec, $is_joliet) {
       return '' unless length $spec;
       $ent= $self->root->entry($spec) // croak "Can't find $spec in root directory";
    }
+   # Return the name as it exists in this directory entry
    !$is_joliet? $ent->{shortname}.';1' : $ent->{name};
 }
 
-sub _pack_primary_volume_descriptor($self, $attrs={}) {
-   $attrs->{root_file}= $self->root->file;
-   $attrs->{path_le_file}= $self->{path_tables}{le};
-   $attrs->{path_be_file}= $self->{path_tables}{be};
-   $self->_pack_volume_descriptor($attrs);
+our @boot_catalog_fields= (
+   [ type_code        => 0x000,   1, 'C', 0 ],
+   [ std_id           => 0x001,   5, 'A', 'CD001' ],
+   [ version          => 0x006,   1, 'C',  1 ],
+   [ system_id        => 0x007,  32, 'A', 'EL TORRITO SPECIFICATION' ],
+   [ boot_id          => 0x027,  32, 'A', '' ],
+   [ extent_lba       => 0x047,   4, 'V' ]
+);
+
+# Boot Catalog Validation Entry (first 32 bytes)
+#our @boot_catalog_validation_entry = (
+#   [ header_id   => 0x00,  1, 'C', 0x01 ],       # must be 0x01
+#   [ platform_id => 0x01,  1, 'C', 0x00 ],       # 0=x86, 1=PPC, 2=Mac, 0xEF=EFI
+#   #[ reserved1   => 0x02, 2, 'v', 0 ],
+#   [ id_string   => 0x04, 24, 'A', 'EL TORITO SPECIFICATION' ],
+#   [ checksum    => 0x1C,  2, 'v', 0 ],          # to be filled in later
+#   [ key         => 0x1E,  2, 'v', 0xAA55 ],
+#);
+
+# Section Header (32 bytes)
+our @boot_catalog_section_header = (
+   [ header_id   => 0x00,  1, 'C', 0x91 ],    # 0x91=section, 0x90=final section
+   [ platform_id => 0x01,  1, 'C', 0x00 ],
+   [ entries_cnt => 0x02,  2, 'v' ],          # number of entries following
+   [ id_string   => 0x04, 28, 'A', '' ],
+);
+
+# Boot Entry (32 bytes)
+our @boot_catalog_entry = (
+   [ bootable     => 0x00, 1, 'C', 0x88 ],      # 0x88 bootable, 0x00 not
+   [ media_type   => 0x01, 1, 'C', 0x00 ],      # 0=no-emul, 1=1.2M, 2=1.44M, 3=2.88M, 4=HDD
+   [ load_segment => 0x02, 2, 'v', 0x0000 ],    # 0x0000=no-emul, 0x07C0=floppy
+   [ system_type  => 0x04, 1, 'C', 0x00 ],      # MBR partition type byte, 0xEF for EFI ESP
+   #[ reserved1    => 0x05, 1, 'C', 0 ],
+   [ sector_count => 0x06, 2, 'v', 0 ],         # size in 512-byte sectors
+   [ extent_lba   => 0x08, 4, 'V', 0 ],         # LBA of boot image
+   [ reserved2    => 0x0C, 20, 'a', '' ],
+);
+
+sub _calc_boot_catalog_size($self) {
+   my $boot_catalog= $self->boot_catalog
+      or return 0;
+   my $file= $boot_catalog->{file} //= $self->_new_file('(boot catalog)');
+   my $size= 32;
+   for my $s ($boot_catalog->{sections}->@*) {
+      $size += 32 + 32 * $s->{entries}->@*;
+   }
+   $file->size(_round_to_whole_sector($size));
+   $size;
 }
 
-sub _pack_joliet_volume_descriptor($self, $attrs={}) {
-   $attrs->{type_code}= 2;
-   $attrs->{escape_sequences} = "%/E"; # Level 3 of Joliet, UCS-2BE
-   $attrs->{root_file}= $self->root->joliet_file;
-   $attrs->{path_le_file}= $self->{path_tables}{jle};
-   $attrs->{path_be_file}= $self->{path_tables}{jbe};
-   $self->_pack_volume_descriptor($attrs);
+# The boot catalog is one (or more, unlikely) sector containing a list of 32-byte entries
+# divided into "sections".
+sub _pack_boot_catalog($self) {
+   my $boot_catalog= $self->boot_catalog;
+   my $sections= $boot_catalog->{sections};
+   my $catalog= pack 'C C @4 A24',
+      1, # header_id = 1
+      $sections->[0]{platform_id}, # copy section0's platform_id
+      'EL TORITO SPECIFICATION';
+   
+   $catalog .= pack 'v v',
+      sum(unpack 'v*', $catalog), # Checksum
+      0xAA55; # key bytes
+
+   for my $s (@$sections) {
+      # final section gets header_id 0x90
+      $catalog .= _pack_fields(\@boot_catalog_section_header, {
+         %$s,
+         header_id => ($s == $sections->[-1] ? 0x90 : 0x91), # indicates last section
+         entries_cnt => scalar($s->{entries}->@*), # num entries in section
+      });
+      for ($s->{entries}->@*) {
+         $catalog .= _pack_fields(\@boot_catalog_entry, $_);
+      }
+   }
+   die "BUG: not a multiple of 32" if length($catalog) & 31;
+   $boot_catalog->{file}->data(\$catalog);
+}
+
+# The boot catalog descriptor is one of the descriptors at the start of the image which
+# tells the extent where the boot catalog can be found.
+sub _pack_boot_catalog_descriptor($self) {
+   my $boot_catalog= $self->boot_catalog;
+   my %attrs= ( %$boot_catalog, extent_lba => $boot_catalog->{file}->extent_lba );
+   return _pack_fields(\@boot_catalog_fields, \%attrs);
 }
 
 1;
