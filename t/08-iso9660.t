@@ -4,7 +4,8 @@ use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
 use POSIX 'ceil';
 use Test2AndUtils;
 use experimental qw( signatures );
-use Sys::Export::ISO9660 qw( is_valid_shortname is_valid_joliet_name );
+use Sys::Export::ISO9660 qw( is_valid_shortname is_valid_joliet_name BOOT_EFI BOOT_X86
+   EMU_NONE EMU_FLOPPY144 );
 
 # The isoinfo utility can dump details of an ISO filesystem.
 my $isoinfo= do { chomp(my $x= `which isoinfo`); $? == 0? $x : undef };
@@ -39,6 +40,68 @@ subtest empty_fs => sub {
       + 4 # 4x path table (LE, BE, Joliet LE, Joliet BE)
       + 2;# root dir, Joliet root dir
    is( -s $tmp, $sectors * 2048, 'minimal fs size' );
+   note `$isoinfo -dJRf -i $tmp` if $isoinfo;
+};
+
+subtest empty_with_boot_loader => sub {
+   my $tmp= File::Temp->new;
+   my $dst= Sys::Export::ISO9660->new($tmp);
+   my $boot_code_size= 1000000;
+   my $sectors= 16 # system
+      + 4 # Volume Descriptors (boot, primary, secondary, terminator)
+      + 1 # boot catalog
+      + 4 # 4x path table (LE, BE, Joliet LE, Joliet BE)
+      + ceil($boot_code_size/2048)
+      + 2;# root dir, Joliet root dir
+   my $esp_ofs= $sectors*2048;
+   my $esp_size= 0x1000;
+   # One entry describing extent of ESP which this moule will assume is already written,
+   # because we don't supply 'data' here
+   $dst->add_boot_catalog_entry(platform => BOOT_EFI, extent_lba => $esp_ofs/2048, size => $esp_size);
+   # One entry supplying a floppy image, providing data which needs allocated and written.
+   $dst->add_boot_catalog_entry(platform => BOOT_X86, data => 'X'x$boot_code_size);
+   $dst->finish;
+   is( $dst->boot_catalog, {
+         sections => [
+            {  id_string => 'UEFI',
+               platform => BOOT_EFI,
+               entries => [
+                  {  bootable => 0x88,
+                     load_segment => 0,
+                     media_type => EMU_NONE,
+                     system_type => 0xEF,
+                     file => object {
+                        call device_offset => $esp_ofs;
+                        call size => $esp_size;
+                     },
+                  }
+               ]
+            },
+            {  id_string => 'x86',
+               platform => BOOT_X86,
+               entries => [
+                  {  bootable => 0x88,
+                     load_segment => 0x7C0,
+                     media_type => EMU_FLOPPY144,
+                     system_type => 0,
+                     file => object {
+                        call extent_lba => T;
+                        call size => $boot_code_size;
+                     },
+                  },
+               ]
+            },
+         ],
+         file => object {
+            call extent_lba => T;
+            call size => 2048;
+         }
+      },
+      'boot_catalog'
+   ) or note explain $dst->boot_catalog;
+   is( $dst->{max_assigned_lba}, $sectors-1, 'max_assigned_lba' );
+   # The actual size will leave room for the 0x100000 partition we described
+   is( -s $tmp, $esp_ofs + $esp_size, 'minimal fs size' );
    note `$isoinfo -dJRf -i $tmp` if $isoinfo;
 };
 
