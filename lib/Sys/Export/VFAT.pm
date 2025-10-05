@@ -470,7 +470,7 @@ sub finish($self) {
 
    my $fh= $self->filehandle;
    if (!$fh) {
-      defined $self->filename or croak "Must set filename or out_fh attributes";
+      defined $self->filename or croak "Must set filename or filehandle attributes";
       open $fh, '+>', $self->filename
          or croak "open: $!";
    }
