@@ -21,7 +21,7 @@ Represents file (or directory) data to be encoded into the ISO image.
 sub new($class, %attrs) {
    my $self= bless {}, $class;
    if (defined (my $o= delete $attrs{device_offset})) {
-      croak "offset must be a multiple of 2048" if $o & 0x7FF;
+      croak "device_offset must be a multiple of 2048" if $o & 0x7FF;
       $attrs{extent_lba}= $o >> 11;
    }
    for (qw( name size data mtime flags extent_lba )) {
@@ -39,7 +39,20 @@ Unicode full path to file, for debugging.
 
 =attribute size
 
-Size, in bytes
+Size, in bytes.  After setting L</extent_lba> to a positive number, attempts to change this
+to a value occupying a different number of sectors will croak.
+
+=attribute extent_lba
+
+LBA number (device_offset / 2048) where this file is located on the device.  A File having
+C<< extent_lba >= 0 >> and undefined C<data> is assumed to represent data that the caller has
+written or will write to this extent.  A file with C<< extent_lba <= 0 >> representa a file
+whose extent will be decided later by the caller and should not be automatically positioned.
+
+=attribute device_offset
+
+Byte offset where this file is located on the device.  Always C<< extent_lba * 2048 >>.
+If you write to this attribute it will croak unless a multiple of 2048.
 
 =attribute data
 
@@ -48,35 +61,45 @@ L<LazyFileData|Sys::Export::LazyFileData> object.
 
 =attribute mtime
 
-Unix epoch time of file creation/modification
+Unix epoch time of file creation/modification, used as default for directory entries.
+(every directory entry can override the mtime)
 
 =attribute flags
 
 Bit flags of file.  Constants come from C<< use Sys::Export::ISO9660 ':flags' >>.
 
-=attribute extent_lba
-
-LBA number (device_offset / 2048) where this file is located on the device.  If this is
-initially set and the L</data> is undefined, it is assumed the file data already exists at this
-location.
-
-=attribute device_offset
-
-Byte offset where this file is located on the device.  Always C<< extent_lba * 2048 >>.
-
 =attribute is_dir
 
-True if the flags include FLAG_DIRECTORY
+True if the flags include C<FLAG_DIRECTORY>
 
 =cut
 
-sub name          { $_[0]{name} }
-sub size          { @_ > 1? ($_[0]{size}= $_[1]) : $_[0]{size} }
-sub data          { @_ > 1? ($_[0]{data}= $_[1]) : $_[0]{data} }
-sub mtime         { @_ > 1? ($_[0]{mtime}= $_[1]) : $_[0]{mtime} }
-sub flags         { @_ > 1? ($_[0]{flags}= $_[1]) : $_[0]{flags} }
-sub extent_lba    { @_ > 1? ($_[0]{extent_lba}= $_[1]) : $_[0]{extent_lba} }
-sub device_offset { $_[0]{extent_lba} && $_[0]{extent_lba} << 11 }
-sub is_dir        { ($_[0]{flags}||0) & Sys::Export::ISO9660::FLAG_DIRECTORY() }
+sub name($self)     { $self->{name} }
+sub data($self, @v) { @v? ($self->{data}= $v[0]) : $self->{data} }
+sub mtime($self, @v) { @v? ($self->{mtime}= $v[0]) : $self->{mtime} }
+sub flags($self, @v) { @v? ($self->{flags}= $v[0]) : $self->{flags} }
+sub is_dir($self) { ($self->{flags}||0) & Sys::Export::ISO9660::FLAG_DIRECTORY() }
+
+sub extent_lba($self, @v) {
+   @v? ($self->{extent_lba}= $v[0]) : $self->{extent_lba}
+}
+
+sub device_offset($self, @v) {
+   if (@v) {
+      croak "device_offset must be a multiple of 2048" if defined $v[0] && $v[0] & 2047;
+      $self->{extent_lba}= $v[0] && ($v[0] >> 11);
+   }
+   $self->{extent_lba} && $self->{extent_lba} << 11
+}
+
+sub size($self, @v) {
+   if (@v) {
+      croak "Sector length of ".$self->name." changed after choosing LBA"
+         if $self->extent_lba && $self->extent_lba > 0
+            && (($v[0]+2047) >> 11) != ((($self->{size}||0)+2047) >> 11);
+      $self->{size}= $v[0];
+   }
+   $self->{size}
+}
 
 1;

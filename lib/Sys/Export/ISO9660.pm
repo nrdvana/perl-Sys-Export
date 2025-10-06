@@ -79,8 +79,15 @@ sub new($class, @attrs) {
             : isa_hash $attrs[0]? %{$attrs[0]}
             : isa_handle $attrs[0]? ( filehandle => $attrs[0] )
             : ( filename => $attrs[0] );
-   my $self= bless {}, $class;
-   $self->{root}= Sys::Export::ISO9660::Directory->new(name => '(root)');
+   my $self= bless {
+      root => Sys::Export::ISO9660::Directory->new(name => '(root)'),
+      # Sectors 0-15 are reserved
+      # + one sector for Primary Volume Descriptor
+      # + one sector for Secondary Volume Descriptor
+      # + one sector for boot catalog descriptor, if used
+      # + Volume Descriptor Set Terminator
+      _free_invlist => [ 19 ], # add one when boot_catalog initialized
+   }, $class;
    # apply other attributes
    $self->$_($attrs{$_}) for keys %attrs;
    $self;
@@ -222,7 +229,7 @@ sub _validate_meta_filename($x, $field='Metadata filename') {
 =attribute boot_catalog
 
 The El Torrito catalog of boot options.  See L</add_boot_catalog_entry> for a convenient way to
-modify this structure.  It starts undefined until the first entry is added.  If undefined, no
+build this structure.  It starts undefined until the first entry is added.  If undefined, no
 boot catalog is written into the ISO image.
 
 Structure:
@@ -240,7 +247,7 @@ Structure:
             media_type   => # EMU_NONE, EMU_FLOPPY12, EMU_FLOPPY144, EMU_FLOPPY288, EMU_HDD
             load_segment => # 0x0000=no-emul, 0x07C0=floppy
             system_type  => # MBR partition type byte, 0xEF for EFI ESP
-            file         => # ISO9660::File object, holds extent_lba and size and data
+            file         => # ISO9660::File object, holds device_offset and size and data
           },
           ...
         ]
@@ -264,7 +271,7 @@ sub boot_catalog { $_[0]{boot_catalog} }
     load_segment      => # address for floppy emulation, default 0x7C0 for floppy types
     system_type       => # MBR partition type code, default 0xEF for EFI
     file              => # ISO9660::File object
-    extent_lba        => # initialize file->extent_lba
+    device_offset     => # initialize file->extent_lba
     size              => # initialize file->size
     data              => # initialize file->data
   );
@@ -274,15 +281,15 @@ sub boot_catalog { $_[0]{boot_catalog} }
 sub add_boot_catalog_entry($self, %attrs) {
    my ($platform, $section_id, $bootable, $media_type, $load_segment, $system_type)
       = delete @attrs{qw( platform section_id bootable media_type load_segment system_type )};
-   my ($file, $extent_lba, $size, $data)
-      = delete @attrs{qw( file extent_lba size data )};
+   my ($file, $device_offset, $size, $data)
+      = delete @attrs{qw( file device_offset size data )};
    croak "Unknown attribute ".join(', ', keys %attrs)
       if keys %attrs;
    croak "require platform"
       unless defined $platform;
 
    $file //= $self->_new_file("(boot image for platform $platform)");
-   $file->extent_lba($extent_lba) if defined $extent_lba;
+   $file->extent_lba($device_offset/512) if defined $device_offset;
    if (defined $data) {
       # Convert to scalar-ref if scalar
       $data= do { my $x= $data; \$x } unless ref $data;
@@ -306,6 +313,15 @@ sub add_boot_catalog_entry($self, %attrs) {
                  : $platform == BOOT_MAC ? 'Mac'
                  : $platform == BOOT_EFI ? 'UEFI'
                  : "Platform $platform";
+
+   if (!$self->{boot_catalog}) {
+      # Ensure sector needed by boot catalog descriptor wasn't already reserved,
+      # e.g. adding boot entries after calling choose_file_extents
+      # This logic needs enhanced if other descriptors become optional.
+      croak "Cannot add boot_catalog after allocating sector 19"
+         unless $self->{_free_invlist}[0] == 19;
+      $self->{_free_invlist}[0]++;
+   }
 
    my $sections= $self->{boot_catalog}{sections} //= [];
    my ($sec)= grep $_->{platform} == $platform && $_->{id_string} eq $section_id, @$sections;
@@ -336,6 +352,16 @@ when C</finalize> is called, it will default to the current time().
 sub default_time {
    @_ > 1? ($_[0]{default_time}= $_[1]) : $_[0]{default_time}
 }
+
+=attribute volume_size
+
+Only valid after calling L</finish> or L</choose_file_extents>.
+Total size of volume, including any extent seen in boot catalog entries.
+This will always be a multiple of the 2048 sector size.
+
+=cut
+
+sub volume_size($self) { $self->{_free_invlist}[-1] * 2048 }
 
 =export is_valid_shortname
 
@@ -394,7 +420,7 @@ extras:
 
 Any file name not conforming to the 8.3 name limitation of FAT will get an auto-generated
 "short" filename, in addition to its "long" filename.  If you want control over what short name
-is generated, you can specify it with C<FAT_shortname>.
+is generated, you can specify it with this attribute.
 
 =item ISO9660_flags
 
@@ -516,17 +542,8 @@ You may get exceptions during this call if there isn't a way to write your files
 
 sub finish($self) {
    $self->{default_time} //= time;
-   my $boot_catalog= $self->boot_catalog;
-   # Find out the size of every directory, and the path tables
-   $self->_calc_boot_catalog_size if $boot_catalog;
-   $self->_calc_dir_sizes;
-   $self->_calc_path_table_size;
    # Choose LBA extents for everything
-   $self->_choose_file_extents;
-   # Pack directories now that all file sector ids are known
-   $self->_pack_directory($_) for $self->root, values $self->{_subdirs}->%*;
-   $self->_pack_path_tables;
-   $self->_pack_boot_catalog if $boot_catalog;
+   $self->choose_file_extents;
 
    my $fh= $self->filehandle;
    if (!$fh) {
@@ -535,9 +552,9 @@ sub finish($self) {
          or croak "open: $!";
    }
    # check size / truncate larger
-   my $min_size= ($self->{max_used_lba}+1) * LBA_SECTOR_SIZE;
-   if (-s $fh < $min_size) {
-      truncate($fh, $min_size) or croak "truncate(iso, $min_size): $!";
+   my $size= $self->volume_size;
+   if (-s $fh < $size) {
+      truncate($fh, $size) or croak "truncate(iso, $size): $!";
    }
    $self->_write_filesystem($fh);
    unless ($self->filehandle) {
@@ -548,15 +565,17 @@ sub finish($self) {
 
 # Write a ISO9660::File object to its configured extent, and clear its ->{data}
 sub _write_file($fh, $file) {
-   my $size= ($file->size + LBA_SECTOR_SIZE-1) & ~(LBA_SECTOR_SIZE-1);
-   write_file_extent($fh, $file->device_offset, $size, $file->data);
-   $file->{data}= undef; # free up memory as we go, also deallocates mmaps
+   my $size= _round_to_whole_sector($file->size);
+   write_file_extent($fh, $file->device_offset, $size, $file->data)
+      if $size && defined $file->data;
+   $file->data(undef); # free up memory as we go, also deallocates mmaps
 }
 
 # Write all descriptors, path tables, directories, and any file with ->{data}.
+# Note that _write_file removes ->data form the file as it is written.
 sub _write_filesystem($self, $fh) {
+   my $boot_catalog= $self->boot_catalog;
    my $lba= 16;
-   my $boot_catalog_file= $self->boot_catalog && $self->boot_catalog->{file};
    # Write Primary Volume Descriptor
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
       \$self->_pack_primary_volume_descriptor);
@@ -566,61 +585,74 @@ sub _write_filesystem($self, $fh) {
    # Write boot catalog if present
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
       \$self->_pack_boot_catalog_descriptor)
-      if $boot_catalog_file;
+      if $boot_catalog;
    # Volume Set Terminator
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE, \"\xFFCD001\x01");
 
    # Boot catalog
-   _write_file($fh, $boot_catalog_file) if $boot_catalog_file;
+   if ($boot_catalog) {
+      $self->_pack_boot_catalog;
+      _write_file($fh, $boot_catalog->{file});
+      
+      # Write any supplied data for boot entry
+      for my $sec ($boot_catalog->{sections}->@*) {
+         _write_file($fh, $_->{file}) for $sec->{entries}->@*;
+      }
+   }
 
    # Write path tables
+   $self->_pack_path_tables;
    _write_file($fh, $_) for $self->{path_tables}->@{qw( le be jle jbe )};
 
    # Write directory entries
    my @dirs= sort { $a->file->extent_lba <=> $b->file->extent_lba }
       $self->root, values $self->{_subdirs}->%*;
    for (@dirs) {
+      $self->_pack_directory($_);
       _write_file($fh, $_) for $_->file, $_->joliet_file;
    }
 
    # Add any non-directory files that have data defined
    for my $dir (@dirs) {
-      for my $ent ($dir->entries->@*) {
-         next if $ent->{dir}; # directory files already got written
-         next unless $ent->{file} && $ent->{file}->size && defined $ent->{file}->data;
-         _write_file($fh, $ent->{file});
-      }
+      _write_file($fh, $_->{file}) for $dir->entries->@*;
    }
 }
 
-# Assign extent_lba to every file where it wasn't already declared.
-# This assumes we have an open-ended number of free sectors.
-# ISOHybrid calls this with all the files owned by VFAT set to extent_lba = -1 so that
-# it can determine how many initial sectors are used, and know where to start the VFAT
-# filesystem, after which it revises all the shared files to point to extents within
-# the VFAT filesystem.
-sub _choose_file_extents {
+=method choose_file_extents
+
+  my $max_used= $iso->choose_file_extents
+
+Assign C<extent_lba> to every file (and data structure represented by a File object) where
+C<extent_lba> is undefined and C<< size > 0 >>.  This assumes we have an open-ended number of
+free sectors.  This should only be called after every file and boot entry have been added.
+
+The return value is the total size (bytes) of everything seen.  This includes partitions
+referenced by the L</boot_catalog>.  You can exclude boot_catalog entries by setting
+C<< extent_lba = -1 >> before the call, then updating to the real value before L</finish>.
+
+ISOHybrid calls this with all the files owned by VFAT set to C<< extent_lba = -1 >> so that
+it can determine how many initial sectors are used, and know where to start the VFAT
+filesystem, after which it revises all the shared files to point to extents within
+the VFAT filesystem.
+
+=cut
+
+sub choose_file_extents {
    my $self= shift;
-   # Sectors 0-15 are reserved
-   # one sector for boot catalog descriptor, if used
-   # one sector for Primary Volume Descriptor
-   # one sector for Secondary Volume Descriptor
-   # and a Volume Descriptor Set Terminator
-   my $boot_catalog= $self->boot_catalog;
-   my $lba= 16 + ($boot_catalog? 1 : 0) + 1 + 1 + 1;
-   my $max_seen= 0;
    my $assign_lba= sub {
-      if (!defined $_->extent_lba) {
-         $_->{extent_lba}= $lba;
-         $lba += ceil($_->size / LBA_SECTOR_SIZE);
-      } else {
-         $max_seen= max($max_seen, $_->extent_lba + ceil($_->size / LBA_SECTOR_SIZE) - 1);
+      my $sec_size= ceil(($_->size // 0) / LBA_SECTOR_SIZE);
+      if ($sec_size && !defined $_->extent_lba) {
+         # Allocate sectors for this file
+         $_->extent_lba($self->_allocate_sectors($sec_size));
+      } elsif ($sec_size && $_->extent_lba > 0) {
+         # make sure these sectors are reserved
+         $self->_mark_sectors_reserved($_->extent_lba, $sec_size);
       }
-      $log->debugf("File %s at LBA %s-%s",
-         $_->name, $_->extent_lba, $_->extent_lba + ceil($_->size / LBA_SECTOR_SIZE) - 1);
+      $log->debugf("File %s at LBA %s +%s", $_->name, $_->extent_lba, $sec_size);
    };
 
-   if ($boot_catalog) {
+   if (my $boot_catalog= $self->boot_catalog) {
+      $self->_calc_boot_catalog_size;
       &$assign_lba for $boot_catalog->{file};
       for my $sec ($boot_catalog->{sections}->@*) {
          &$assign_lba for grep defined, map $_->{file}, $sec->{entries}->@*;
@@ -628,19 +660,67 @@ sub _choose_file_extents {
    }
 
    # Add the 4 path tables here
+   $self->_calc_path_table_size unless $self->{path_tables};
    &$assign_lba for $self->{path_tables}->@{qw( le be jle jbe )};
+
    # Add the directories here
+   $self->_calc_dir_sizes;
    my @dirs= ( $self->root, values $self->{_subdirs}->%* );
    for my $dir (@dirs) {
       &$assign_lba for $dir->file, $dir->joliet_file;
    }
    # Add any files that didn't get assigned yet
    for my $dir (@dirs) {
-      &$assign_lba for grep defined $_ && $_->size && defined $_->data,
-         map $_->{file}, $dir->entries->@*;
+      &$assign_lba for grep defined, map $_->{file}, $dir->entries->@*;
    }
-   $self->{max_assigned_lba}= $lba-1;
-   $self->{max_used_lba}= max($max_seen, $lba-1);
+   return $self->{_free_invlist}[-1] * 2048;
+}
+
+# Find an available range of sectors to allocate from the free list
+sub _allocate_sectors($self, $sector_count) {
+   my $inv= $self->{_free_invlist};
+   # Iterate the inversion list looking for a range large enough
+   # The end of the list has lim=undef.
+   for (my $i= 0; $i <= @$inv; $i+= 2) {
+      my ($start, $lim)= $inv->@[$i,$i+1];
+      if (!$lim || $lim - $start > $sector_count) {
+         $inv->[$i] += $sector_count;
+         return $start;
+      }
+      if ($lim - $start == $sector_count) {
+         splice(@$inv, $i, 2);
+         return $start;
+      }
+   }
+   die "BUG"; # should never get here, as long as list is odd length.
+}
+
+# Mark a range of sectors as unavailable for allocation
+sub _mark_sectors_reserved($self, $reserve_lba, $sector_count) {
+   my $reserve_lim= $reserve_lba + $sector_count;
+   my $inv= $self->{_free_invlist};
+   for (my $i= 0; $i < @$inv; $i += 2) {
+      my ($start, $lim)= $inv->@[$i,$i+1];
+      # If this free range is entirely beyond the $lba+$count, request is already reserved
+      return if $start >= $reserve_lim;
+      # If this free range is entirely less than the request, continue loop
+      next if $lim && $lim <= $reserve_lba;
+      # If start == lba, move start forward, possibly consuming it
+      if ($start >= $reserve_lba) {
+         if (!$lim || $reserve_lim < $lim) {
+            $inv->[$i]= $reserve_lim;
+            return;
+         } else {
+            splice(@$inv, $i, 2);
+            return if $reserve_lim == $lim;
+            $i -= 2; # keep looping until free range is beyond reserve_lim
+         }
+      } else { # start < lba, truncate current range
+         $inv->[$i+1]= $reserve_lba;
+         # end of the loop? add a new open-ended range
+         $inv->[$i+2]= $reserve_lim if $i+1 == $#$inv;
+      }
+   }
 }
 
 sub _calc_dir_sizes($self) {
@@ -675,8 +755,8 @@ sub _calc_dir_sizes($self) {
             $_->{path_table_jsize}= 8 + length($joliet_name);
          }
       }
-      $dir->{file}{size}= _round_to_whole_sector($size);
-      $dir->{joliet_file}{size}= _round_to_whole_sector($joliet);
+      $dir->{file}->size(_round_to_whole_sector($size));
+      $dir->{joliet_file}->size(_round_to_whole_sector($joliet));
    }
 }
 
@@ -777,12 +857,10 @@ sub _calc_path_table_size($self) {
          }
       }
    }
-   $self->{path_tables}= {
-      le  => $self->_new_file('(path_table LE)', size => $size),
-      be  => $self->_new_file('(path_table BE)', size => $size),
-      jle => $self->_new_file('(path_table Joliet,LE)', size => $jsize),
-      jbe => $self->_new_file('(path_table Joliet,BE)', size => $jsize),
-   };
+   ($self->{path_tables}{le}  //= $self->_new_file('(path_table LE)'))->size($size);
+   ($self->{path_tables}{be}  //= $self->_new_file('(path_table BE)'))->size($size);
+   ($self->{path_tables}{jle} //= $self->_new_file('(path_table Joliet,LE)'))->size($jsize);
+   ($self->{path_tables}{jbe} //= $self->_new_file('(path_table Joliet,BE)'))->size($jsize);
 }
 
 sub _pack_path_tables($self) {
@@ -934,7 +1012,7 @@ sub _pack_volume_descriptor($self, $attrs) {
    };
    $attrs->{system_id}    //= $self->system // uc($^O);
    $attrs->{volume_id}    //= $self->volume_label // 'CDROM';
-   $attrs->{volume_space} //= $self->{max_used_lba}+1;
+   $attrs->{volume_space} //= $self->{_free_invlist}[-1];
    $attrs->{path_sz}      //= $attrs->{path_le_file}->size;
    $attrs->{path_le}      //= $attrs->{path_le_file}->extent_lba;
    $attrs->{path_be}      //= $attrs->{path_be_file}->extent_lba;
@@ -1015,7 +1093,7 @@ sub _calc_boot_catalog_size($self) {
    for my $s ($boot_catalog->{sections}->@*) {
       $size += 32 + 32 * $s->{entries}->@*;
    }
-   $file->size(_round_to_whole_sector($size));
+   $file->size($size);
    $size;
 }
 
@@ -1049,7 +1127,8 @@ sub _pack_boot_catalog($self) {
          });
       }
    }
-   die "BUG: not a multiple of 32" if length($catalog) & 31;
+   die "BUG: encoded size doesn't match file->size"
+      if length($catalog) != $boot_catalog->{file}->size;
    $boot_catalog->{file}->data(\$catalog);
 }
 

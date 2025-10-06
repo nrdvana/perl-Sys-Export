@@ -53,13 +53,17 @@ subtest empty_with_boot_loader => sub {
       + 4 # 4x path table (LE, BE, Joliet LE, Joliet BE)
       + ceil($boot_code_size/2048)
       + 2;# root dir, Joliet root dir
-   my $esp_ofs= $sectors*2048;
-   my $esp_size= 0x1000;
    # One entry describing extent of ESP which this moule will assume is already written,
    # because we don't supply 'data' here
-   $dst->add_boot_catalog_entry(platform => BOOT_EFI, extent_lba => $esp_ofs/2048, size => $esp_size);
+   my $esp_size= 0x10000;
+   my $esp_ent= $dst->add_boot_catalog_entry(platform => BOOT_EFI);
    # One entry supplying a floppy image, providing data which needs allocated and written.
    $dst->add_boot_catalog_entry(platform => BOOT_X86, data => 'X'x$boot_code_size);
+   is( $dst->choose_file_extents, $sectors*2048, 'max_assigned_lba' );
+   # Now define the location of the ESP
+   my $esp_ofs= $dst->volume_size;
+   $esp_ent->{file}->size($esp_size);
+   $esp_ent->{file}->device_offset($esp_ofs);
    $dst->finish;
    is( $dst->boot_catalog, {
          sections => [
@@ -94,14 +98,14 @@ subtest empty_with_boot_loader => sub {
          ],
          file => object {
             call extent_lba => T;
-            call size => 2048;
+            call size => 32*5; # header, section, entry, section, entry
          }
       },
       'boot_catalog'
    ) or note explain $dst->boot_catalog;
-   is( $dst->{max_assigned_lba}, $sectors-1, 'max_assigned_lba' );
    # The actual size will leave room for the 0x100000 partition we described
-   is( -s $tmp, $esp_ofs + $esp_size, 'minimal fs size' );
+   is( $dst->volume_size, $esp_ofs + $esp_size, 'volume_size after finish' );
+   is( -s $tmp, $esp_ofs + $esp_size, 'file size' );
    note `$isoinfo -dJRf -i $tmp` if $isoinfo;
 };
 
