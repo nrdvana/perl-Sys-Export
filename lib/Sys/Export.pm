@@ -20,7 +20,7 @@ BEGIN {
 }
 our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
-   isa_handle isa_pow2 round_up_to_pow2 round_up_to_multiple map_or_load_file filedata
+   isa_handle isa_pow2 isa_data_ref round_up_to_pow2 round_up_to_multiple map_or_load_file filedata
    add skip find which finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
    write_file_extent
    S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
@@ -28,7 +28,7 @@ our @EXPORT_OK= qw(
 );
 our %EXPORT_TAGS= (
    basic_methods => [qw( exporter add skip find which finish rewrite_path rewrite_user rewrite_group filedata )],
-   isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_handle isa_int isa_pow2 )],
+   isa => [qw( isa_exporter isa_export_dst isa_userdb isa_user isa_group isa_hash isa_array isa_handle isa_int isa_pow2 isa_data_ref )],
    stat_modes => [qw( S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT )],
    stat_tests => [qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT )],
 );
@@ -312,6 +312,7 @@ sub isa_userdb     :prototype($) { blessed($_[0]) && $_[0]->can('user') && $_[0]
 sub isa_user       :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
 sub isa_group      :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
 sub isa_pow2       :prototype($) { $_[0] == round_up_to_pow2($_[0]-1) }
+sub isa_data_ref   :prototype($) { ref $_[0] eq 'SCALAR' || blessed($_[0]) && $_[0]->can('as_scalarref') }
 
 =head2 C<:stat_modes> bundle
 

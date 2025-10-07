@@ -59,11 +59,11 @@ subtest empty_with_boot_loader => sub {
    my $esp_ent= $dst->add_boot_catalog_entry(platform => BOOT_EFI);
    # One entry supplying a floppy image, providing data which needs allocated and written.
    $dst->add_boot_catalog_entry(platform => BOOT_X86, data => 'X'x$boot_code_size);
-   is( $dst->choose_file_extents, $sectors*2048, 'max_assigned_lba' );
+   is( $dst->allocate_extents, $sectors*2048, 'max_assigned_lba' );
    # Now define the location of the ESP
    my $esp_ofs= $dst->volume_size;
-   $esp_ent->{file}->size($esp_size);
-   $esp_ent->{file}->device_offset($esp_ofs);
+   $esp_ent->{extent}->size($esp_size);
+   $esp_ent->{extent}->device_offset($esp_ofs);
    $dst->finish;
    is( $dst->boot_catalog, {
          sections => [
@@ -74,7 +74,7 @@ subtest empty_with_boot_loader => sub {
                      load_segment => 0,
                      media_type => EMU_NONE,
                      system_type => 0xEF,
-                     file => object {
+                     extent => object {
                         call device_offset => $esp_ofs;
                         call size => $esp_size;
                      },
@@ -88,16 +88,16 @@ subtest empty_with_boot_loader => sub {
                      load_segment => 0x7C0,
                      media_type => EMU_FLOPPY144,
                      system_type => 0,
-                     file => object {
-                        call extent_lba => T;
+                     extent => object {
+                        call lba => T;
                         call size => $boot_code_size;
                      },
                   },
                ]
             },
          ],
-         file => object {
-            call extent_lba => T;
+         extent => object {
+            call lba => T;
             call size => 32*5; # header, section, entry, section, entry
          }
       },

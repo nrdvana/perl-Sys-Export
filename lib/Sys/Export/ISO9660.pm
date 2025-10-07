@@ -206,7 +206,7 @@ for (qw( publisher preparer application )) {
 sub _validate_meta_label($x, $field='Metadata label') {
    # Metadata labels can either be a text label of the "a-characters" (most of ascii)
    # or a file object to refer to a file containing the data.
-   unless (blessed $x && $x->can('extent_lba')) {
+   unless (blessed $x && $x->can('device_offset')) {
       $x= uc $x;
       croak "$field must be 0..64 uppercase ASCII characters (excluding some punctuation)"
          unless $x =~ m{^ [- !"%&'()*+,./0-9:;<=>?A-Z_]{0,64} \z}x;
@@ -218,7 +218,7 @@ for (qw( copyright_file abstract_file bibliographic_file )) {
    eval "sub $_ { \@_ > 1? (\$_[0]{$_}= _validate_meta_filename(\$_[1], '$_')) : \$_[0]{$_} } 1" or die "$@";
 }
 sub _validate_meta_filename($x, $field='Metadata filename') {
-   unless (blessed $x && $x->can('extent_lba')) {
+   unless (blessed $x && $x->can('device_offset')) {
       $x= uc $x;
       croak "$field must be a valid 8.3 filename"
          unless $x =~ m{^ [A-Z0-9_]{1,8} (\.[A-Z0-9_]{0,3})? (;[0-9]+)? \z}x;
@@ -270,10 +270,10 @@ sub boot_catalog { $_[0]{boot_catalog} }
     media_type        => # EMU_NONE, EMU_FLOPPY12, EMU_FLOPPY144, EMU_FLOPPY288, EMU_HDD
     load_segment      => # address for floppy emulation, default 0x7C0 for floppy types
     system_type       => # MBR partition type code, default 0xEF for EFI
-    file              => # ISO9660::File object
-    device_offset     => # initialize file->extent_lba
-    size              => # initialize file->size
-    data              => # initialize file->data
+    extent            => # Sys::Export::Extent object
+    device_offset     => # initialize extent->device_offset
+    size              => # initialize extent->size
+    data              => # initialize extent->data
   );
 
 =cut
@@ -281,26 +281,26 @@ sub boot_catalog { $_[0]{boot_catalog} }
 sub add_boot_catalog_entry($self, %attrs) {
    my ($platform, $section_id, $bootable, $media_type, $load_segment, $system_type)
       = delete @attrs{qw( platform section_id bootable media_type load_segment system_type )};
-   my ($file, $device_offset, $size, $data)
-      = delete @attrs{qw( file device_offset size data )};
+   my ($extent, $device_offset, $size, $data)
+      = delete @attrs{qw( extent device_offset size data )};
    croak "Unknown attribute ".join(', ', keys %attrs)
       if keys %attrs;
    croak "require platform"
       unless defined $platform;
 
-   $file //= $self->_new_file("(boot image for platform $platform)");
-   $file->extent_lba($device_offset/512) if defined $device_offset;
+   $extent //= Sys::Export::Extent->new(name => "(boot image for platform $platform)");
+   $extent->device_offset($device_offset) if defined $device_offset;
    if (defined $data) {
       # Convert to scalar-ref if scalar
       $data= do { my $x= $data; \$x } unless ref $data;
       $size //= length $$data;
    }
-   $file->size($size) if defined $size;
+   $extent->size($size) if defined $size;
 
    $bootable //= 0x88; # bootable by default
    $media_type //= $platform == BOOT_EFI? EMU_NONE
                  # If boot loader is larger than a floppy, probably doesn't rely on emulation
-                 : ($file->size//0) > 1474560? EMU_NONE
+                 : ($extent->size//0) > 1474560? EMU_NONE
                  # standard floppy emulation
                  : EMU_FLOPPY144;
    # load segment is the memory address BIOS loads the image into before running the boot loader
@@ -316,7 +316,7 @@ sub add_boot_catalog_entry($self, %attrs) {
 
    if (!$self->{boot_catalog}) {
       # Ensure sector needed by boot catalog descriptor wasn't already reserved,
-      # e.g. adding boot entries after calling choose_file_extents
+      # e.g. adding boot entries after calling allocate_extents
       # This logic needs enhanced if other descriptors become optional.
       croak "Cannot add boot_catalog after allocating sector 19"
          unless $self->{_free_invlist}[0] == 19;
@@ -337,7 +337,7 @@ sub add_boot_catalog_entry($self, %attrs) {
       media_type   => $media_type,
       load_segment => $load_segment,
       system_type  => $system_type,
-      file         => $file,
+      extent       => $extent,
    };
    return $sec->{entries}[-1];
 }
@@ -355,7 +355,7 @@ sub default_time {
 
 =attribute volume_size
 
-Only valid after calling L</finish> or L</choose_file_extents>.
+Only valid after calling L</finish> or L</allocate_extents>.
 Total size of volume, including any extent seen in boot catalog entries.
 This will always be a multiple of the 2048 sector size.
 
@@ -543,7 +543,7 @@ You may get exceptions during this call if there isn't a way to write your files
 sub finish($self) {
    $self->{default_time} //= time;
    # Choose LBA extents for everything
-   $self->choose_file_extents;
+   $self->allocate_extents;
 
    my $fh= $self->filehandle;
    if (!$fh) {
@@ -592,11 +592,11 @@ sub _write_filesystem($self, $fh) {
    # Boot catalog
    if ($boot_catalog) {
       $self->_pack_boot_catalog;
-      _write_file($fh, $boot_catalog->{file});
+      _write_file($fh, $boot_catalog->{extent});
       
       # Write any supplied data for boot entry
       for my $sec ($boot_catalog->{sections}->@*) {
-         _write_file($fh, $_->{file}) for $sec->{entries}->@*;
+         _write_file($fh, $_->{extent}) for $sec->{entries}->@*;
       }
    }
 
@@ -605,7 +605,7 @@ sub _write_filesystem($self, $fh) {
    _write_file($fh, $_) for $self->{path_tables}->@{qw( le be jle jbe )};
 
    # Write directory entries
-   my @dirs= sort { $a->file->extent_lba <=> $b->file->extent_lba }
+   my @dirs= sort { $a->file->device_offset <=> $b->file->device_offset }
       $self->root, values $self->{_subdirs}->%*;
    for (@dirs) {
       $self->_pack_directory($_);
@@ -618,12 +618,12 @@ sub _write_filesystem($self, $fh) {
    }
 }
 
-=method choose_file_extents
+=method allocate_extents
 
-  my $max_used= $iso->choose_file_extents
+  my $max_used= $iso->allocate_extents;
 
-Assign C<extent_lba> to every file (and data structure represented by a File object) where
-C<extent_lba> is undefined and C<< size > 0 >>.  This assumes we have an open-ended number of
+Assign C<device_offset> to every file (and data structure represented by a File object) where
+C<device_offset> is undefined and C<< size > 0 >>.  This assumes we have an open-ended number of
 free sectors.  This should only be called after every file and boot entry have been added.
 
 The return value is the total size (bytes) of everything seen.  This includes partitions
@@ -637,30 +637,30 @@ the VFAT filesystem.
 
 =cut
 
-sub choose_file_extents {
+sub allocate_extents {
    my $self= shift;
    my $assign_lba= sub {
       my $sec_size= ceil(($_->size // 0) / LBA_SECTOR_SIZE);
-      if ($sec_size && !defined $_->extent_lba) {
-         # Allocate sectors for this file
-         $_->extent_lba($self->_allocate_sectors($sec_size));
-      } elsif ($sec_size && $_->extent_lba > 0) {
+      if ($sec_size && !defined $_->device_offset) {
+         # Allocate sectors for this file.  Can't assign LBA because the boot extents are 512-byte blocks
+         $_->device_offset($self->_allocate_sectors($sec_size) * LBA_SECTOR_SIZE);
+      } elsif ($sec_size && $_->device_offset > 0) {
          # make sure these sectors are reserved
-         $self->_mark_sectors_reserved($_->extent_lba, $sec_size);
+         $self->_mark_sectors_reserved($_->device_offset >> LBA_SECTOR_POW2, $sec_size);
       }
-      $log->debugf("File %s at LBA %s +%s", $_->name, $_->extent_lba, $sec_size);
+      $log->debugf("File %s at LBA %s +%s", $_->name, $_->block_address, $sec_size);
    };
 
    if (my $boot_catalog= $self->boot_catalog) {
       $self->_calc_boot_catalog_size;
-      &$assign_lba for $boot_catalog->{file};
+      &$assign_lba for $boot_catalog->{extent};
       for my $sec ($boot_catalog->{sections}->@*) {
-         &$assign_lba for grep defined, map $_->{file}, $sec->{entries}->@*;
+         &$assign_lba for grep defined, map $_->{extent}, $sec->{entries}->@*;
       }
    }
 
    # Add the 4 path tables here
-   $self->_calc_path_table_size unless $self->{path_tables};
+   $self->_calc_path_table_size;
    &$assign_lba for $self->{path_tables}->@{qw( le be jle jbe )};
 
    # Add the directories here
@@ -786,7 +786,7 @@ our @dirent_fields = (
 sub _encode_dirent($self, $name, $file, $ent= {}) {
    my $name_len=     length $name;
    my $dir_len=      33 + ($name_len|1);
-   my $extent_lba=   $ent->{extent_lba} // $file && $file->extent_lba // 0;
+   my $extent_lba=   $ent->{extent_lba} // $file && $file->block_address // 0;
    my $size=         $ent->{size} // $file && $file->size // 0;
    my $seq=          $ent->{seq} // 1;
    pack 'C C V N V N a7 C C C v n C a'.($name_len|1),
@@ -857,18 +857,21 @@ sub _calc_path_table_size($self) {
          }
       }
    }
-   ($self->{path_tables}{le}  //= $self->_new_file('(path_table LE)'))->size($size);
-   ($self->{path_tables}{be}  //= $self->_new_file('(path_table BE)'))->size($size);
-   ($self->{path_tables}{jle} //= $self->_new_file('(path_table Joliet,LE)'))->size($jsize);
-   ($self->{path_tables}{jbe} //= $self->_new_file('(path_table Joliet,BE)'))->size($jsize);
+   my sub path_table_extent($name) {
+      Sys::Export::Extent->new(block_size => 2048, name => $name)
+   }
+   ($self->{path_tables}{le}  //= path_table_extent('(path_table LE)'))->size($size);
+   ($self->{path_tables}{be}  //= path_table_extent('(path_table BE)'))->size($size);
+   ($self->{path_tables}{jle} //= path_table_extent('(path_table Joliet,LE)'))->size($jsize);
+   ($self->{path_tables}{jbe} //= path_table_extent('(path_table Joliet,BE)'))->size($jsize);
 }
 
 sub _pack_path_tables($self) {
    # Need packed for both 8.3 filenames and Joliet filenames, and encoded both little-endian
    # and big-endian, for 4 total path tables.
    my ($le, $be, $jle, $jbe);
-   $le= $jle= pack 'C C V v a2', 10, 0, $self->root->file->extent_lba, 1, '';
-   $be= $jbe= pack 'C C N n a2', 10, 0, $self->root->file->extent_lba, 1, '';
+   $le= $jle= pack 'C C V v a2', 10, 0, $self->root->file->block_address, 1, '';
+   $be= $jbe= pack 'C C N n a2', 10, 0, $self->root->file->block_address, 1, '';
    my @paths= ( [ $self->root, 1 ] );
    my $i= 0;
    my ($size, $jsize)= (0, 0);
@@ -876,11 +879,11 @@ sub _pack_path_tables($self) {
       my ($dir, $parent_id)= @{ $paths[$i++] };
       for my $ent ($dir->entries->@*) {
          if ($ent->{dir}) {
-            my @vals= ( $ent->{path_table_size}, 0, $ent->{dir}->file->extent_lba, $parent_id, $ent->{shortname} );
+            my @vals= ( $ent->{path_table_size}, 0, $ent->{dir}->file->block_address, $parent_id, $ent->{shortname} );
             $le .= pack 'C C V v a'.($ent->{path_table_size}-8), @vals;
             $be .= pack 'C C N n a'.($ent->{path_table_size}-8), @vals;
             my $jname= encode('UTF-16BE', $ent->{name}, Encode::FB_CROAK | Encode::LEAVE_SRC);
-            @vals= ( $ent->{path_table_jsize}, 0, $ent->{dir}->joliet_file->extent_lba, $parent_id, $jname );
+            @vals= ( $ent->{path_table_jsize}, 0, $ent->{dir}->joliet_file->block_address, $parent_id, $jname );
             $jle .= pack 'C C V v a*', @vals;
             $jbe .= pack 'C C N n a*', @vals;
          }
@@ -890,10 +893,10 @@ sub _pack_path_tables($self) {
    croak "BUG: wrong encoded path_table size"
       unless length $le == $path_tables->{le}->size && length $be == $path_tables->{be}->size
       && length $jle == $path_tables->{jle}->size && length $jbe == $path_tables->{jbe}->size;
-   $path_tables->{le}{data}= \$le;
-   $path_tables->{be}{data}= \$be;
-   $path_tables->{jle}{data}= \$jle;
-   $path_tables->{jbe}{data}= \$jbe;
+   $path_tables->{le}->data(\$le);
+   $path_tables->{be}->data(\$be);
+   $path_tables->{jle}->data(\$jle);
+   $path_tables->{jbe}->data(\$jbe);
 }
 
 sub _pack_iso_volume_datetime($epoch) {
@@ -986,8 +989,8 @@ sub _pack_fields($field_array, $attrs, $charset=undef) {
 
 sub _pack_primary_volume_descriptor($self, $attrs={}) {
    $attrs->{root_file}= $self->root->file;
-   $attrs->{path_le_file}= $self->{path_tables}{le};
-   $attrs->{path_be_file}= $self->{path_tables}{be};
+   $attrs->{path_le}= $self->{path_tables}{le};
+   $attrs->{path_be}= $self->{path_tables}{be};
    $self->_pack_volume_descriptor($attrs);
 }
 
@@ -995,8 +998,8 @@ sub _pack_joliet_volume_descriptor($self, $attrs={}) {
    $attrs->{type_code}= 2;
    $attrs->{escape_sequences} = "%/E"; # Level 3 of Joliet, UCS-2BE
    $attrs->{root_file}= $self->root->joliet_file;
-   $attrs->{path_le_file}= $self->{path_tables}{jle};
-   $attrs->{path_be_file}= $self->{path_tables}{jbe};
+   $attrs->{path_le}= $self->{path_tables}{jle};
+   $attrs->{path_be}= $self->{path_tables}{jbe};
    $self->_pack_volume_descriptor($attrs);
 }
 
@@ -1007,15 +1010,15 @@ sub _pack_volume_descriptor($self, $attrs) {
    # reference to a file in the root dir by starting with a '_' character.
    my $maybe_file_ref= sub($thing) {
       return '_'.$self->_get_metadata_filename($thing, $is_joliet)
-         if blessed($thing) && $thing->can('extent_lba');
+         if blessed($thing) && $thing->can('device_offset');
       return $thing;
    };
    $attrs->{system_id}    //= $self->system // uc($^O);
    $attrs->{volume_id}    //= $self->volume_label // 'CDROM';
    $attrs->{volume_space} //= $self->{_free_invlist}[-1];
-   $attrs->{path_sz}      //= $attrs->{path_le_file}->size;
-   $attrs->{path_le}      //= $attrs->{path_le_file}->extent_lba;
-   $attrs->{path_be}      //= $attrs->{path_be_file}->extent_lba;
+   $attrs->{path_sz}      //= $attrs->{path_le}->size;
+   $attrs->{path_le}      //= $attrs->{path_le}->block_address;
+   $attrs->{path_be}      //= $attrs->{path_be}->block_address;
    $attrs->{root_dirent}  //= $self->_encode_dirent("\0", $attrs->{root_file});
    $attrs->{creation_ts}     //= _pack_iso_volume_datetime($attrs->{btime} // $self->{default_time});
    $attrs->{modification_ts} //= _pack_iso_volume_datetime($attrs->{mtime} // $self->{default_time});
@@ -1035,7 +1038,7 @@ sub _pack_volume_descriptor($self, $attrs) {
 sub _get_metadata_filename($self, $spec, $is_joliet) {
    my $ent;
    # Find the root directory entry which refers to this file
-   if (blessed($spec) && $spec->can('extent_lba')) { # file object
+   if (blessed($spec) && $spec->can('device_offset')) { # file object
       ($ent)= grep $_->{file} == $spec, $self->root->entries->@*
          or croak "Can't find ".$spec->name." in root directory";
    } else {
@@ -1081,19 +1084,19 @@ our @boot_catalog_entry = (
    [ system_type  => 0x04, 1, 'C', 0x00 ],      # MBR partition type byte, 0xEF for EFI ESP
    #[ reserved1    => 0x05, 1, 'C', 0 ],
    [ sector_count => 0x06, 2, 'v', 0 ],         # size in 512-byte sectors
-   [ extent_lba   => 0x08, 4, 'V', 0 ],         # LBA of boot image
+   [ sector_start => 0x08, 4, 'V', 0 ],         # LBA of boot image
    [ reserved2    => 0x0C, 20, 'a', '' ],
 );
 
 sub _calc_boot_catalog_size($self) {
    my $boot_catalog= $self->boot_catalog
       or return 0;
-   my $file= $boot_catalog->{file} //= $self->_new_file('(boot catalog)');
+   my $extent= $boot_catalog->{extent} //= Sys::Export::Extent->new(name => '(boot catalog)');
    my $size= 32;
    for my $s ($boot_catalog->{sections}->@*) {
       $size += 32 + 32 * $s->{entries}->@*;
    }
-   $file->size($size);
+   $extent->size($size);
    $size;
 }
 
@@ -1122,21 +1125,21 @@ sub _pack_boot_catalog($self) {
             %$_,
             # The lba and sector count are measured in 512-byte sectors like BIOS,
             # rather than 2048 sectors like the rest of ISO9660
-            extent_lba   => $_->{file}->device_offset / 512,
-            sector_count => ceil($_->{file}->size / 512),
+            sector_start => $_->{extent}->block_address,
+            sector_count => ceil($_->{extent}->size / 512),
          });
       }
    }
    die "BUG: encoded size doesn't match file->size"
-      if length($catalog) != $boot_catalog->{file}->size;
-   $boot_catalog->{file}->data(\$catalog);
+      if length($catalog) != $boot_catalog->{extent}->size;
+   $boot_catalog->{extent}->data(\$catalog);
 }
 
 # The boot catalog descriptor is one of the descriptors at the start of the image which
 # tells the extent where the boot catalog can be found.
 sub _pack_boot_catalog_descriptor($self) {
    my $boot_catalog= $self->boot_catalog;
-   my %attrs= ( %$boot_catalog, extent_lba => $boot_catalog->{file}->extent_lba );
+   my %attrs= ( %$boot_catalog, extent_lba => $boot_catalog->{extent}->block_address );
    return _pack_fields(\@boot_catalog_descriptor, \%attrs);
 }
 
