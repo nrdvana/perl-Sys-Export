@@ -648,7 +648,7 @@ sub allocate_extents {
          # make sure these sectors are reserved
          $self->_mark_sectors_reserved($_->device_offset >> LBA_SECTOR_POW2, $sec_size);
       }
-      $log->debugf("File %s at LBA %s +%s", $_->name, $_->block_address, $sec_size);
+      $log->debugf("File %s at LBA (%d) %d +%d", $_->name, $_->block_size, $_->start_lba, $sec_size);
    };
 
    if (my $boot_catalog= $self->boot_catalog) {
@@ -786,7 +786,7 @@ our @dirent_fields = (
 sub _encode_dirent($self, $name, $file, $ent= {}) {
    my $name_len=     length $name;
    my $dir_len=      33 + ($name_len|1);
-   my $extent_lba=   $ent->{extent_lba} // $file && $file->block_address // 0;
+   my $extent_lba=   $ent->{extent_lba} // $file && $file->start_lba // 0;
    my $size=         $ent->{size} // $file && $file->size // 0;
    my $seq=          $ent->{seq} // 1;
    pack 'C C V N V N a7 C C C v n C a'.($name_len|1),
@@ -870,8 +870,8 @@ sub _pack_path_tables($self) {
    # Need packed for both 8.3 filenames and Joliet filenames, and encoded both little-endian
    # and big-endian, for 4 total path tables.
    my ($le, $be, $jle, $jbe);
-   $le= $jle= pack 'C C V v a2', 10, 0, $self->root->file->block_address, 1, '';
-   $be= $jbe= pack 'C C N n a2', 10, 0, $self->root->file->block_address, 1, '';
+   $le= $jle= pack 'C C V v a2', 10, 0, $self->root->file->lba, 1, '';
+   $be= $jbe= pack 'C C N n a2', 10, 0, $self->root->file->lba, 1, '';
    my @paths= ( [ $self->root, 1 ] );
    my $i= 0;
    my ($size, $jsize)= (0, 0);
@@ -879,11 +879,11 @@ sub _pack_path_tables($self) {
       my ($dir, $parent_id)= @{ $paths[$i++] };
       for my $ent ($dir->entries->@*) {
          if ($ent->{dir}) {
-            my @vals= ( $ent->{path_table_size}, 0, $ent->{dir}->file->block_address, $parent_id, $ent->{shortname} );
+            my @vals= ( $ent->{path_table_size}, 0, $ent->{dir}->file->lba, $parent_id, $ent->{shortname} );
             $le .= pack 'C C V v a'.($ent->{path_table_size}-8), @vals;
             $be .= pack 'C C N n a'.($ent->{path_table_size}-8), @vals;
             my $jname= encode('UTF-16BE', $ent->{name}, Encode::FB_CROAK | Encode::LEAVE_SRC);
-            @vals= ( $ent->{path_table_jsize}, 0, $ent->{dir}->joliet_file->block_address, $parent_id, $jname );
+            @vals= ( $ent->{path_table_jsize}, 0, $ent->{dir}->joliet_file->lba, $parent_id, $jname );
             $jle .= pack 'C C V v a*', @vals;
             $jbe .= pack 'C C N n a*', @vals;
          }
@@ -1017,8 +1017,8 @@ sub _pack_volume_descriptor($self, $attrs) {
    $attrs->{volume_id}    //= $self->volume_label // 'CDROM';
    $attrs->{volume_space} //= $self->{_free_invlist}[-1];
    $attrs->{path_sz}      //= $attrs->{path_le}->size;
-   $attrs->{path_le}      //= $attrs->{path_le}->block_address;
-   $attrs->{path_be}      //= $attrs->{path_be}->block_address;
+   $attrs->{path_le}      //= $attrs->{path_le}->lba;
+   $attrs->{path_be}      //= $attrs->{path_be}->lba;
    $attrs->{root_dirent}  //= $self->_encode_dirent("\0", $attrs->{root_file});
    $attrs->{creation_ts}     //= _pack_iso_volume_datetime($attrs->{btime} // $self->{default_time});
    $attrs->{modification_ts} //= _pack_iso_volume_datetime($attrs->{mtime} // $self->{default_time});
@@ -1125,7 +1125,7 @@ sub _pack_boot_catalog($self) {
             %$_,
             # The lba and sector count are measured in 512-byte sectors like BIOS,
             # rather than 2048 sectors like the rest of ISO9660
-            sector_start => $_->{extent}->block_address,
+            sector_start => $_->{extent}->lba,
             sector_count => ceil($_->{extent}->size / 512),
          });
       }
@@ -1139,7 +1139,7 @@ sub _pack_boot_catalog($self) {
 # tells the extent where the boot catalog can be found.
 sub _pack_boot_catalog_descriptor($self) {
    my $boot_catalog= $self->boot_catalog;
-   my %attrs= ( %$boot_catalog, extent_lba => $boot_catalog->{extent}->block_address );
+   my %attrs= ( %$boot_catalog, extent_lba => $boot_catalog->{extent}->lba );
    return _pack_fields(\@boot_catalog_descriptor, \%attrs);
 }
 

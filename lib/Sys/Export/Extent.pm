@@ -47,7 +47,7 @@ Be sure to set C<size> before C<device_offset>.
 
 =constructor new
 
-  $file= Sys::Export::ISO9660::File->new(%attributes);
+  $file= Sys::Export::Extent->new(%attributes);
 
 Represents file (or directory) data to be encoded into the ISO image.
 
@@ -55,10 +55,13 @@ Represents file (or directory) data to be encoded into the ISO image.
 
 sub new($class, %attrs) {
    my $self= bless { name => delete $attrs{name} }, $class;
+   # Some fields need to be initialized in a specific order:
    $self->block_size(delete $attrs{block_size}) if defined $attrs{block_size};
    $self->size(delete $attrs{size}) if defined $attrs{size};
    $self->data(delete $attrs{data}) if defined $attrs{data};
    $self->device_offset(delete $attrs{device_offset}) if defined $attrs{device_offset};
+   $self->start_lba(delete $attrs{start_lba}) if defined $attrs{start_lba};
+   # The rest have no interdependencies
    for (keys %attrs) {
       my $m= $self->can($_) or croak "Unknown attribute '$_'";
       $m->($self, $attrs{$_});
@@ -124,26 +127,46 @@ sub device_offset($self, @v) {
    $self->{device_offset}
 }
 
-=attribute block_address
+=attribute start_lba
 
-Used to read or write device_address by its LBA.  When reading, a negative C<device_offset>
-is converted to an C<undef> block_address.
+Logical Block Address; used to read or write device_address by its LBA.
+When reading, a negative C<device_offset> is converted to an undefined LBA.
 
 =attribute lba
 
-Logical Block Address; alias for C<block_address>.
+Alias for C<start_lba>
+
+=attribute end_lba
+
+Used to read or write C<size> relative to C<device_address>, in terms of C<block_size>.
 
 =cut
 
-sub block_address($self, @v) {
+sub start_lba($self, @v) {
    if (@v) {
-      $self->device_offset($v[0] && ($v[0] * 2048));
+      $self->device_offset($v[0] && ($v[0] * $self->block_size));
    }
    my $ofs= $self->device_offset;
+   use integer;
    return defined $ofs && $ofs >= 0? ($ofs / $self->block_size) : undef;
 }
 
-*lba= *block_address;
+*lba= *start_lba;
+
+sub end_lba($self, @v) {
+   if (@v) {
+      my $lba= $self->start_lba;
+      croak "Can't set end_lba until start_lba is defined"
+         unless defined $lba;
+      # Using 'size' accessor would trigger the check for altering the size after setting
+      # device offset, which is less likely to be a useful safeguard when someone is setting
+      # start_lba/end_lba.
+      $self->{size}= ($v[0] + 1 - $lba) * $self->block_size;
+   }
+   my ($ofs, $size)= ($self->device_offset, $self->size);
+   use integer;
+   return ($ofs//-1) < 0 || !$size ? undef : ($ofs + $size - 1) / $self->block_size;
+}
 
 =attribute data
 
