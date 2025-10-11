@@ -642,7 +642,8 @@ sub allocate_extents {
    my $assign_lba= sub {
       my $sec_size= ceil(($_->size // 0) / LBA_SECTOR_SIZE);
       if ($sec_size && !defined $_->device_offset) {
-         # Allocate sectors for this file.  Can't assign LBA because the boot extents are 512-byte blocks
+         # Allocate sectors for this file.  Can't assign via lba attribute because the
+         # boot_catalog entry extents are 512-byte blocks
          $_->device_offset($self->_allocate_sectors($sec_size) * LBA_SECTOR_SIZE);
       } elsif ($sec_size && $_->device_offset > 0) {
          # make sure these sectors are reserved

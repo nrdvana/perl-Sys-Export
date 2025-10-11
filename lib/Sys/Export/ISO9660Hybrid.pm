@@ -6,8 +6,10 @@ package Sys::Export::ISO9660Hybrid;
 use v5.26;
 use warnings;
 use experimental qw( signatures );
-use Sys::Export qw( :isa write_file_extent expand_stat_shorthand round_up_to_multiple );
+use Carp;
+use Sys::Export qw( :isa write_file_extent expand_stat_shorthand round_up_to_multiple S_ISDIR );
 use Sys::Export::LogAny '$log';
+use Sys::Export::GPT;
 use Sys::Export::ISO9660 qw( BOOT_EFI );
 use Sys::Export::VFAT;
 use constant {
@@ -15,6 +17,8 @@ use constant {
    GPT_TYPE_ESP    => 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B',
    GPT_TYPE_GRUB   => '21686148-6449-6E6F-744E-656564454649',
 };
+use Exporter 'import';
+our @EXPORT_OK= qw( GPT_TYPE_ESP GPT_TYPE_GRUB );
 
 =head1 SYNOPSIS
 
@@ -22,52 +26,59 @@ use constant {
     output => $filename_or_handle,
   );   
   $dst->add(...); # add directory entries, cached in memory
-  $dst->finish;   # builds both a FAT32 and ISO9660 filesystem
+  $dst->finish;   # builds ISO9660 & VFAT filesystem, and GPT partitions
 
 =head1 DESCRIPTION
 
-This module helps you generate a "isohybrid" image which is both an iso9660 filesystem and a
-MBR and GPT-labeled disk with one VFAT EFI partition.  Unlike with the C<xorriso> tool, your
-files are visible in both filesystems simultaneously.
+This module helps you generate a "isohybrid" image which is both an iso9660 image and a
+GPT-labeled disk image (with both 4K and 512b GPT tables) with one VFAT EFI partition.
+Unlike with the C<xorriso> tool, your files are visible in both filesystems simultaneously,
+and the files point to the same disk extents.
 
-=head2 Legacy BIOS, Disk
+This image is also capable of booting in four different modes (assuming you provide appropriate
+boot loaders):
 
-Legacy i386 BIOS executes the first 446 bytes of the first sector as i386 instructions.  Those
+=over
+
+=item Legacy BIOS, Disk
+
+Legacy i386 BIOS executes the first 440 bytes of the first sector as i386 instructions.  Those
 instructions are free to do whatever they want.  GRUB 2 uses them to read a GPT partition label
-and locate a partition where the rest of the boot loader is found.  The rest of the grub boot
+and locate a partition where "stage 1.5" of the boot loader is found.  The rest of the grub boot
 loader then locates the EFI partition, and finds the main boot loader files in C<< boot/grub >>
 of that volume.
 
-=head2 Legacy BIOS, CDROM
+=item Legacy BIOS, CDROM
 
 Legacy i386 BIOS looks through the CDROM Volume Descriptor entries looking for an entry that
 describes an extent which is a virtual floppy disk image.  It then loads that extent as if it
 were a floppy disk, which means it essentially just starts executing it.
-This image is large enough that it doesn't require Grub to be split into two parts.
-Grub then locates the EFI partition, and finds the main boot loader files in C<< boot/grub >>
-of that volume.
+This image is large enough that it doesn't require GRUB to be split into two parts.
+GRUB then loads stage 2 from the ISO filesystem, which are the same files described by the
+ESP VFAT filesystem.
 
-=head2 UEFI, Disk
+=item UEFI, Disk
 
 UEFI expects a GPT-labeled disk with a special EFI System Partition which is formatted as VFAT
 and which contains a file C<< \EFI\BOOT\BOOTX64.EFI >>.  It executes this file as an EFI
 application.
 
-=head2 UEFI, CDROM
+=item UEFI, CDROM
 
 UEFI looks through the CDROM Volume Descriptors for an entry that lists an extent of sectors
 containing a EFI VFAT filesystem.  This extent is essentially the same as a partition.
 It then loads C<< \EFI\BOOT\BOOTX64.EFI >> the same as if it were a disk.
 
-=head2 Hybridization
+=back
 
-All the specifications above can co-exist in the same disk image.  CDROM images leave the first
+All the specifications above can co-exist in the same image.  CDROM images leave the first
 16 sectors empty, which is enough for a GPT partition data structure, and GPT leaves the first
-sector empty which is enough for the 446 bytes of legacy boot code.  The GPT label can list
+sector empty which is enough for the 440 bytes of legacy boot code.  The GPT label can list
 partitions that exist anywhere in the image, and the CDROM Volume Descriptors can refer to
 extents anywhere in the image, so the EFI partition can be referenced by each of them.
 Additionally, the CDROM's filesystem can refer to extents anywhere on the image, so it can
-refer to the bodies of VFAT files as long as they are aligned to 2KiB boundaries.
+refer to the bodies of VFAT files as long as they are aligned to 2KiB boundaries and not
+fragmented.  This module takes care of all of that alignment.
 
 =constructor new
 
@@ -76,7 +87,7 @@ refer to the bodies of VFAT files as long as they are aligned to 2KiB boundaries
   $fat= Sys::Export::ISO9660Hybrid->new(\%attrs);
 
 This takes a list of attributes as a hashref or key/value list.  If there is exactly one
-argument, it is treated as the filename attribute.
+argument, it is treated as the C<filename> or C<filehandle> attribute.
 
 =cut
 
@@ -87,8 +98,14 @@ sub new($class, @attrs) {
             : ( filename => $attrs[0] );
    my $self= bless {
          iso => Sys::Export::ISO9660->new,
-         vfat => Sys::Export::VFAT->new,
-         files => [],
+         esp => Sys::Export::VFAT->new,
+         gpt => Sys::Export::GPT->new(
+            block_size => 4096,
+            partitions => [
+               { type => GPT_TYPE_ESP, name => 'UEFI System Partition' },
+            ],
+         ),
+         dual_files => [],
       }, $class;
    # apply other attributes
    $self->$_($attrs{$_}) for keys %attrs;
@@ -103,7 +120,7 @@ handle as C<filehandle>.
 
 =attribute filehandle
 
-Output filehandle to write.  The file will be enlarged if it is not big enough.
+Output filehandle to write.  The file will be enlarged with C<truncate> if needed.
 
 =cut
 
@@ -116,19 +133,30 @@ An instance of L<Sys::Export::ISO9660>.
 
 =attribute esp
 
-An instance of L<Sys::Export::VFAT> for the EFI System Partition.
+An instance of L<Sys::Export::VFAT> for the EFI System Partition (ESP).
+
+=attribute gpt
+
+An instance of L<Sys::Export::GPT> aligned for 4K block sizes.  A GPT for 512b block size
+matching the 4K one is generated during L</finish>.  It must have one partition defined as
+C<< { type => GPT_TYPE_ESP } >>, but you may add any number of others.
+
+If you define other partitions, you must assign the size and leave the start_lba undefined,
+so that this module can choose the placement.  (After L</finish> you can come back to inspect
+the location of your partition and make other changes to the disk image.)
 
 =cut
 
 sub iso($self) { $self->{iso} }
 sub esp($self) { $self->{esp} }
+sub gpt($self) { $self->{gpt} }
 
 =attribute volume_label
 
 Returns ISO volume_label.  If written, sets both C<iso> and C<esp> volume label attributes to
 the new value.  Note that while ESP is usually given a volume label like "ESP", for a removable
 read-only image you probably want to give it a distinct name to avoid being confused with the
-ESP of your harddrive.
+ESP of your installed OS on your main drive.
 
 =cut
 
@@ -140,55 +168,47 @@ sub volume_label {
    $_[0]->iso->volume_label;
 }
 
-=attribute boot_code
+=attribute mbr_boot_code
 
-A string of bytes (scalar, scalar-ref, or C<FileData|Sys::Export::FileData>) which will be
-written to sector 0.
+File data (scalar-ref or C<LazyFileData|Sys::Export::LazyFileData>) which will be written to
+the first 440 bytes of sector 0.  The data can be any length; only the first 440 bytes will be
+used.
 
-=attribute partition_align
+=cut
 
-Power of 2 for aligning partitions.  Must be at least 512.  Default is 4096.
-
-=attribute partitions
-
-A list of partition specifications:
-
-  [
-    {
-      type   => $guid,
-      data   => $scalar_or_scalarref_or_FileData,
-      guid   => $part_guid,             # random default
-      offset => $starting_byte_offset,  # defaults to next available
-      size   => $byte_length,           # defaults to data length
-    },
-    ...
-  ]
-
-These are written as GPT partitions.  This will always include one partition of type ESP_GUID.
-You can use this to add the partition for GRUB stage 1.5, or any other partiton you want, or to
-force the offset or size of the ESP.  If 'data' is undefined, L</finish> will calculate the
-partition location but not write anything to it, allowing you to handle that yourself.
+sub mbr_boot_code($self, @v) {
+   if (@v) {
+      my $data= ref $v[0]? $v[0] : \$v[0];
+      my $sector0= substr($$data, 0, 512);
+      carp "boot_code contains nonzero bytes in partition table area"
+         unless length($sector0) <= 446 || substr($sector0, 446, 64) =~ /^\0+\z/;
+      $self->{mbr_boot_code}= \$sector0;
+   }
+   $self->{mbr_boot_code};
+}
 
 =method add
 
   $dst->add(\%fileinfo);
 
-Adds a file or directory to both VFAT and ISO filesystems.  Returns the ISO file/directroy
+Adds a file or directory to both VFAT and ISO filesystems.  Returns the VFAT file/directroy
 object.
 
 =cut
 
 sub add($self, $fileinfo) {
+   $fileinfo= { expand_stat_shorthand($fileinfo) }
+      if isa_array $fileinfo;
    my $is_dir= S_ISDIR($fileinfo->{mode}||0);
    if ($is_dir) {
-      $self->esp->add($fileinfo);
-      return $self->iso->add($fileinfo);
+      $self->iso->add($fileinfo);
+      return $self->esp->add($fileinfo);
    } else {
-      my $vfile= $self->esp->add({ %$fileinfo, align => ISO_SECTOR_SIZE );
+      my $vfile= $self->esp->add({ %$fileinfo, align => ISO_SECTOR_SIZE });
       # prevent ISO9660 from assigning a LBA to this file
       my $ifile= $self->iso->add({ %$fileinfo, device_offset => -1 });
-      push @{$self->{files}}, [ $vfile, $ifile ];
-      return $ifile;
+      push @{$self->{dual_files}}, [ $vfile, $ifile ];
+      return $vfile;
    }
 }
 
@@ -209,104 +229,106 @@ sub finish($self) {
       open $fh, '+>', $self->filename
          or croak "open: $!";
    }
-   my ($iso, $esp)= ($self->iso, $self->esp);
+   my ($iso, $esp, $gpt4k)= ($self->iso, $self->esp, $self->gpt);
    $iso->filehandle($fh);
    $esp->filehandle($fh);
-   # Add the El Torrito ESP entry, but we don't know the offset yet so leave that as -1
+   # Add the El Torrito ESP entry, but we don't know the offset yet
+   # This lets ISO9660 know that it needs to reserve a boot catalog.
    my $esp_catalog_entry= $iso->add_boot_catalog_entry(
-      platform_id => BOOT_EFI,
-      device_offset => -1,
+      platform => BOOT_EFI,
+      device_offset => 0,
       size => 0,
    );
-   # Find out the size of every ISO directory, and the path tables
-   $iso->_calc_dir_sizes;
-   $iso->_calc_path_table_size;
    # Choose LBA extents for all the directory structures and files other than the shared ones
-   # we marked as LBA -1
-   $iso->_choose_file_extents;
+   # we marked as device_offset => -1
+   $iso->allocate_extents;
    # Now we know how much space the ISO structures and filesystem occupy, and can place all
    # partitions after that.
-   my $ofs= ($iso->{max_used_lba}+1) * ISO_SECTOR_SIZE;
-   for my $p ($self->partitons->@*) {
-      if (!defined $p->{offset}) {
-         $ofs= round_up_to_multiple($ofs, $self->partition_align);
-         $p->{offset}= $ofs;
-         if ($p->{type} eq GPT_TYPE_ESP) {
-            # Now we know the device offset for the partition containing VFAT
-            $esp->device_offset($p->{offset});
-            # Now we can finalize the VFAT and get device addresses for all its files
-            $esp->finalize;
-            $p->{size}= $esp->size;
-            $esp_catalog_entry->{file}->extent_lba($ofs / ISO_SECTOR_SIZE);
-            $esp_catalog_entry->{file}->size($p->{size});
-         }
-         $ofs += $p->{size};
-      }
+   my $ofs= $iso->volume_size;
+   # ISO9660 leaves the first 16 2K blocks empty.  We need to fit a GPT512 header @512, a GPT4K
+   # header @4K, and a partition table for each from the remaining 24K, so 12K each, 24 entries
+   # with the default entry_size.
+   my $gpt512= Sys::Export::GPT->new(
+      %$gpt4k,
+      block_size => 512,
+      partitions => [ map +{ %$_, block_size => 512 }, $gpt4k->partitions->@* ]
+   );
+   my $table_bytes_needed= $gpt4k->entry_size * $gpt4k->partitions->@*;
+   my $table_4ks_needed= round_up_to_multiple($table_bytes_needed, 4096);
+   if ($table_bytes_needed <= 3*1024) {
+      $gpt512->entry_table_lba(2); # block immediately after the header, ofs=1K
+      $gpt4k->entry_table_lba(2);  # block immediately after the header, ofs=8K
+   } elsif ($table_bytes_needed <= 12*1024) {
+      $gpt512->entry_table_lba(16); # block following 4K header, ofs=8K
+      $gpt4k->entry_table_lba(5);   # block following 512table, ofs=20K
+   } else { # no room, so tables need to go after the ISO data
+      $gpt512->entry_table_lba($ofs / 512);
+      $ofs= round_up_to_multiple($ofs + $table_bytes_needed, 4096);
+      $gpt4k->entry_table_lba($ofs / 4096);
+      $ofs+= $table_bytes_needed;
    }
-   for ($self->{files}->@*) {
+
+   # Now choose locations for all the partitions
+   $ofs= round_up_to_multiple($ofs, 4096);
+   $gpt512->first_block($ofs/512);
+   $gpt4k->first_block($ofs/4096);
+   for my $i (0 .. $#{$gpt4k->partitions}) {
+      my $p= $gpt4k->partitions->[$i];
+      $ofs= round_up_to_multiple($ofs, $gpt4k->partition_align // 4096);
+      # This algorithm doesn't currently account for partitons that the user
+      # placed manually.
+      croak "partion $i already has start_lba defined" if defined $p->start_lba;
+      $p->device_offset($ofs);
+      if ($p->type eq GPT_TYPE_ESP && !$esp->volume_offset) {
+         # Now we know the device offset for the partition containing VFAT
+         $esp->volume_offset($p->device_offset);
+         # Now we can write the VFAT and get device addresses for all its files
+         $esp->finish;
+         $p->size(round_up_to_multiple($esp->geometry->total_size, 4096));
+         $esp_catalog_entry->{extent}->device_offset($p->device_offset);
+         $esp_catalog_entry->{extent}->size($p->size);
+      } else {
+         croak "Partiton $i lacks size" unless $p->size;
+      }
+      $gpt512->partitions->[$i]->device_offset($p->device_offset);
+      $gpt512->partitions->[$i]->size($p->size);
+      $ofs= $p->device_offset + $p->size;
+   }
+   $ofs= round_up_to_multiple($ofs, 4096);
+   # Is the file already sized larger than the amount of remaining space we need?
+   my $table_size_in_4k= round_up_to_multiple($table_bytes_needed, 4096);
+   my $need_size= $ofs + $table_size_in_4k * 2 + 4096;
+   my $size= -s $fh;
+   if ($size < $need_size) {
+      truncate($fh, $need_size) || croak "Can't resize file";
+      $size= $need_size;
+   }
+   # work backward from end of device
+   $gpt512->backup_header_lba(int($size / 512) - 1);
+   $gpt4k->backup_header_lba(int($size / 4096) - 1);
+   $ofs= $gpt4k->backup_header_lba * 4096 - $table_size_in_4k;
+   $gpt4k->backup_table_lba($ofs / 4096);
+   $ofs -= $table_size_in_4k;
+   $gpt512->backup_table_lba($ofs / 512);
+   $gpt512->last_block($ofs / 512 - 1);
+   $gpt4k->last_block($ofs / 4096 - 1);
+
+   # Now point all the ISO and VFAT files to the same extents
+   for ($self->{dual_files}->@*) {
       my ($vfile, $ifile)= @$_;
       croak "BUG: unaligned file" if $vfile->device_offset % ISO_SECTOR_SIZE;
-      $ifile->extent_lba($vfile->device_offset / ISO_SECTOR_SIZE);
+      $ifile->device_offset($vfile->device_offset);
    }
-   # Now we can finalize the ISO9660
-   $iso->finalize;
-   ...;
-   # Now write the partition table
-   # Make sure the boot_code didn't have data in the partition tables
-   my $sector0= pack('a512', ${$self->boot_code});
-   carp "boot_code contains nonzero bytes in partition table area"
-      unless length($sector0) <= 446 || substr($sector0, 446, 64) eq "\0"x64;
-   # "Protective MBR" for GPT
-   $sector0= pack 'a446 NNVV @510 v',
-      $sector0, # keep first 446 bytes
-      0x00000200, 0xEEFFFFFF, 1, min(0xFFFFFFFF, $img_size),
-      0xAA55; # signature at end of MBR
-   write_file_extent($fh, 0, $sector0);
-   ...; #encode partition table header
-   # Each partition for GPT
-   for my $p ($self->partitons->@*) {
-      ...
+   # Now we can write the ISO9660
+   $iso->finish;
+   # Now write the partition tables.  Write the 4K one first because the 512 will overwrite
+   # the tail of 4k's backup header.
+   $gpt4k->write_to_file($fh);
+   $gpt512->write_to_file($fh);
+   # Last, write the 440 bytes of boot loader if supplied by the user
+   if ($self->mbr_boot_code) {
+      write_file_extent($fh, 0, 440, $self->mbr_boot_code, 0, 'Boot Code');
    }
-   # ensure it ends before offset 2048*16
-   write_file_extent($fh, 512, $gpt);
-}
-
-our @gpt_header_fields= (
-   [ GPT_signature       =>    0,  8, 'a8', 'EFI PART' ],
-   [ GPT_revision        =>  0x8,  4, 'V' ],
-   [ GPT_header_size     =>  0xC,  4, 'V', 512 ],
-   [ GPT_header_crc32    => 0x10,  4, 'V' ],
-   [ GPT_header_lba      => 0x18,  8, 'Q<', 2 ],
-   [ GPT_header2_lba     => 0x20,  8, 'Q<' ],
-   [ GPT_first_block     => 0x28,  8, 'Q<' ],
-   ] GPT_last_block      => 0x30,  8, 'Q<' ],
-   [ GPT_disk_guid       => 0x38, 16, 'a16' ],
-   [ GPT_entry_lba       => 0x48,  8, 'a8' ],
-   [ GPT_entry_count     => 0x50,  4, 'V' ],
-   [ GPT_entry_size      => 0x54,  4, 'V', 128 ],
-   [ GPT_entry_crc32     => 0x58,  4, 'V' ],
-);
-our @got_entry_fields= (
-   [ type_guid           =>    0, 16, 'a16' ],
-   [ partition_guid      => 0x10, 16, 'a16' ],
-   [ extent_lba          => 0x20,  8, 'Q<' ],
-   [ end_lba
-);
-sub _append_pack_args($pack, $vals, $ofs, $fields, $attrs) {
-   for (@$fields) {
-      push @$pack, '@'.($ofs+$_->[1]).$_->[3];
-      push @$vals, $attrs->{$_->[0]} // $_->[4]
-         // croak "No value supplied for $_->[0], and no default";
-   }
-}
-
-sub _pack_gpt_header($self, %attrs) {
-   ...
-}
-
-sub _pack_gpt_entry($self, %attrs) {
-   # GPT header
-   pack 
 }
 
 1;

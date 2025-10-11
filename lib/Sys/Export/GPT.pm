@@ -26,7 +26,17 @@ use Carp;
 
 =head1 DESCRIPTION
 
-Implements GUID Partition Table (GPT) creation with proper CRC32 checksums and GUID generation.
+This module writes a GUID Partition Table (GPT) into a file handle.  It is intended mainly for
+writing disk images, not installing GPT onto an actual disk, but could be used for that purpose.
+The defaults of this module deviate a bit from what a normal 'fdisk' would write; the default
+partition alignment is 4KiB rather than 1MiB, and it sizes the partition table to hold only as
+many partition entries as you supply rather than reserving space for the standard 128 entries.
+Beware that the layout of GPT is dependent on the device's reported block size, and that GPT's
+backup header should be located in the final block of the device which depends on the device
+size.
+
+When writing to a file, the file size is used if it is larger than the described data, but if
+the file is too small the file is enlarged to exactly as many blocks as required.
 
 =constructor new
 
@@ -40,6 +50,7 @@ sub new($class, %attrs) {
       entry_size => 128,
       entry_table_lba => 2,
       partitions => [],
+      partition_align => 4096,
    }, $class;
    # Some fields need to be initialized in a specific order:
    $self->block_size(delete $attrs{block_size}) if defined $attrs{block_size};
@@ -116,6 +127,11 @@ Partition objects will have their block_size set to match the L</block_size> of 
 (If you modify the array afterward, you need to set block_size on them yourself, or write to
 the L</block_size> attribute again)
 
+=attribute partition_align
+
+Power of 2 in bytes.  When automatically choosing partition locations during
+L</choose_missing_geometry>, this aligns the C<start_lba> to a byte boundary.
+
 =cut
 
 sub partitions($self, @v) {
@@ -126,6 +142,8 @@ sub partitions($self, @v) {
    }
    $self->{partitions} // [];
 }
+
+sub partition_align { @_ > 1? ($_[0]{partition_align}= $_[1]) : $_[0]{partition_align} }
 
 =attribute entry_table_lba
 
@@ -185,34 +203,40 @@ sub _generate_guid {
    sprintf '%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x', @bytes;
 }
 
-=head2 write_to_file
+=head2 choose_missing_geometry
 
-  $gpt->write_to_file($fh);
+  $gpt->choose_missing_geometry($device_size_in_bytes);
 
-Writes the complete GPT structure to the given filehandle, including:
+This calculates default values for the attributes C<entry_table_lba>, C<backup_header_lba>,
+C<backup_table_lba>, C<first_block>, C<last_block>, and chooses the C<start_lba> of any
+partition that didn't have one yet (aligned to C<partition_align>).
 
-  - Protective MBR (LBA 0, but excluding first 446 bytes of boot loader)
-  - Primary GPT header (LBA 1)
-  - Partition entry array (LBA 2+)
-  - Any partition with defined ->data
-  - Backup partition entry array (end of disk)
-  - Backup GPT header (last LBA)
+If the space required by your partitions and GPT structures is larger than
+C<$device_size_in_bytes>, this will choose block addresses beyond C<$device_size_in_bytes>
+under the assumption that we are writing a file that can be enlarged.  If you are writing to an
+actual block device of fixed size, you can check whether C<backup_header_lba> is the last block
+of the device before calling C<write_to_file>.
+
+This makes the assumption that partitions are in ascending order, and does not check for
+overlaps.  It does check if they exceed C<first_block> or C<last_block>.
 
 =cut
 
-sub choose_missing_geometry($self, $device_size) {
+sub choose_missing_geometry($self, $device_size= undef) {
+   $device_size //= $self->device_size;
    my $pttn= $self->{partitions};
+   my $bs= $self->block_size;
    # Determine number of partition entries.  128 ought to be the defaut, but Sys::Export is
    # all about generating minimal images, so just round up to a whole block.
    my $n_entries= max( scalar @$pttn, 1 );
-   my $entries_per_block= $self->block_size / $self->entry_size;
+   my $entries_per_block= $bs / $self->entry_size;
    $n_entries= round_up_to_multiple($n_entries, $entries_per_block)
       if $entries_per_block > 1;
    $#$pttn= $n_entries - 1; # update array length to match
 
    my $n_table_blocks= $n_entries / $entries_per_block;
 
-   my $end_lba= int($device_size / $self->block_size) - 1;
+   my $end_lba= int($device_size / $bs) - 1;
 
    # header is located at 1, so entries can begin at 2.
    $self->{entry_table_lba} //= 2;
@@ -222,7 +246,10 @@ sub choose_missing_geometry($self, $device_size) {
 
    # Assign position for any partition not yet defined
    my $lba_pos= $self->first_block;
+   my $block_align= $self->partition_align / $bs;
    for (grep defined, @$pttn) {
+      round_up_to_multiple($lba_pos, $block_align) if $block_align > 1;
+      $_->block_size($self->block_size);
       $_->start_lba($lba_pos) unless defined $_->start_lba;
       croak "No end_lba for partition ".$_->name
          unless defined $_->end_lba;
@@ -269,6 +296,21 @@ sub choose_missing_geometry($self, $device_size) {
    $self->backup_table_lba + $n_table_blocks <= $self->backup_header_lba
       or croak "backup_header_lba at lower LBA than end of backup partition entry array";
 }
+
+=head2 write_to_file
+
+  $gpt->write_to_file($fh);
+
+Writes the complete GPT structure to the given filehandle, including:
+
+  - Protective MBR (LBA 0, but excluding first 446 bytes of boot loader)
+  - Primary GPT header (LBA 1)
+  - Partition entry array (LBA 2+)
+  - Any partition with defined ->data
+  - Backup partition entry array (end of disk)
+  - Backup GPT header (last LBA)
+
+=cut
 
 sub write_to_file($self, $fh) {
    croak "No filehandle provided" unless isa_handle $fh;
@@ -392,20 +434,20 @@ sub _pack_header($self, $is_backup, $entries_crc) {
    my $num_entries = scalar @{$self->partitions};
    # Build header without CRC first
    my $header = pack('a8 V V V V Q< Q< Q< Q< a16 Q< V V V',
-      'EFI PART',                    # Signature
-      0x00010000,                    # Revision 1.0
-      92,                            # Header size
-      0,                             # CRC32 (placeholder)
-      0,                             # Reserved
-      $header_lba,                   # Current LBA
-      $alt_header_lba,               # Alternate LBA
-      $self->first_block,            # First usable LBA
-      $self->last_block,             # Last usable LBA
-      _pack_guid($self->guid),       # Disk GUID
-      $entries_lba,                  # Partition entries LBA
-      $num_entries,                  # Number of entries
-      $self->entry_size,             # Size of entry
-      $entries_crc                   # Partition entries CRC32
+      'EFI PART',              # Signature
+      0x00010000,              # Revision 1.0
+      92,                      # Header size
+      0,                       # CRC32 (placeholder)
+      0,                       # Reserved
+      $header_lba,             # Current LBA
+      $alt_header_lba,         # Alternate LBA
+      $self->first_block,      # First usable LBA
+      $self->last_block,       # Last usable LBA
+      _pack_guid($self->guid), # Disk GUID
+      $entries_lba,            # Partition entries LBA
+      $num_entries,            # Number of entries
+      $self->entry_size,       # Size of entry
+      $entries_crc             # Partition entries CRC32
    );
    
    # Calculate and insert header CRC
