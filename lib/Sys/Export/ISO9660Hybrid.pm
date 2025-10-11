@@ -187,6 +187,14 @@ sub mbr_boot_code($self, @v) {
    $self->{mbr_boot_code};
 }
 
+=attribute partitions
+
+Shortcut for C<< ->gpt->partitions >>.
+
+=cut
+
+sub partitions { shift->gpt->partitions(@_) }
+
 =method add
 
   $dst->add(\%fileinfo);
@@ -204,8 +212,8 @@ sub add($self, $fileinfo) {
       $self->iso->add($fileinfo);
       return $self->esp->add($fileinfo);
    } else {
-      my $vfile= $self->esp->add({ %$fileinfo, align => ISO_SECTOR_SIZE });
-      # prevent ISO9660 from assigning a LBA to this file
+      my $vfile= $self->esp->add({ %$fileinfo, device_align => ISO_SECTOR_SIZE });
+      # prevent ISO9660 from assigning a LBA to this file.
       my $ifile= $self->iso->add({ %$fileinfo, device_offset => -1 });
       push @{$self->{dual_files}}, [ $vfile, $ifile ];
       return $vfile;
@@ -254,7 +262,6 @@ sub finish($self) {
       partitions => [ map +{ %$_, block_size => 512 }, $gpt4k->partitions->@* ]
    );
    my $table_bytes_needed= $gpt4k->entry_size * $gpt4k->partitions->@*;
-   my $table_4ks_needed= round_up_to_multiple($table_bytes_needed, 4096);
    if ($table_bytes_needed <= 3*1024) {
       $gpt512->entry_table_lba(2); # block immediately after the header, ofs=1K
       $gpt4k->entry_table_lba(2);  # block immediately after the header, ofs=8K
@@ -287,8 +294,13 @@ sub finish($self) {
          $p->size(round_up_to_multiple($esp->geometry->total_size, 4096));
          $esp_catalog_entry->{extent}->device_offset($p->device_offset);
          $esp_catalog_entry->{extent}->size($p->size);
-      } else {
-         croak "Partiton $i lacks size" unless $p->size;
+      } elsif (!$p->size) {
+         # was data supplied?
+         if ($p->data) {
+            $p->size(round_up_to_multiple(length ${$p->data}, 4096));
+         } else {
+            croak "Partiton $i lacks size" unless $p->size;
+         }
       }
       $gpt512->partitions->[$i]->device_offset($p->device_offset);
       $gpt512->partitions->[$i]->size($p->size);
@@ -316,7 +328,7 @@ sub finish($self) {
    # Now point all the ISO and VFAT files to the same extents
    for ($self->{dual_files}->@*) {
       my ($vfile, $ifile)= @$_;
-      croak "BUG: unaligned file" if $vfile->device_offset % ISO_SECTOR_SIZE;
+      die "BUG: unaligned file" if $vfile->device_offset % ISO_SECTOR_SIZE;
       $ifile->device_offset($vfile->device_offset);
    }
    # Now we can write the ISO9660

@@ -565,7 +565,8 @@ sub finish($self) {
 
 # Write a ISO9660::File object to its configured extent, and clear its ->{data}
 sub _write_file($fh, $file) {
-   my $size= _round_to_whole_sector($file->size);
+   defined $file->size || defined $file->data or die "BUG: file $file->{name} has no size or data";
+   my $size= _round_to_whole_sector($file->size // length ${$file->data});
    write_file_extent($fh, $file->device_offset, $size, $file->data)
       if $size && defined $file->data;
    $file->data(undef); # free up memory as we go, also deallocates mmaps
@@ -596,7 +597,7 @@ sub _write_filesystem($self, $fh) {
       
       # Write any supplied data for boot entry
       for my $sec ($boot_catalog->{sections}->@*) {
-         _write_file($fh, $_->{extent}) for $sec->{entries}->@*;
+         $_->{extent} && _write_file($fh, $_->{extent}) for $sec->{entries}->@*;
       }
    }
 
@@ -609,12 +610,12 @@ sub _write_filesystem($self, $fh) {
       $self->root, values $self->{_subdirs}->%*;
    for (@dirs) {
       $self->_pack_directory($_);
-      _write_file($fh, $_) for $_->file, $_->joliet_file;
+      $_ && _write_file($fh, $_) for $_->file, $_->joliet_file;
    }
 
    # Add any non-directory files that have data defined
    for my $dir (@dirs) {
-      _write_file($fh, $_->{file}) for $dir->entries->@*;
+      $_->{file} && _write_file($fh, $_->{file}) for $dir->entries->@*;
    }
 }
 
@@ -661,11 +662,11 @@ sub allocate_extents {
    }
 
    # Add the 4 path tables here
+   $self->_calc_dir_sizes;
    $self->_calc_path_table_size;
    &$assign_lba for $self->{path_tables}->@{qw( le be jle jbe )};
 
    # Add the directories here
-   $self->_calc_dir_sizes;
    my @dirs= ( $self->root, values $self->{_subdirs}->%* );
    for my $dir (@dirs) {
       &$assign_lba for $dir->file, $dir->joliet_file;
@@ -811,7 +812,7 @@ sub _pack_directory($self, $dir) {
       $joliet .= $self->_encode_dirent("\x01", $parent->joliet_file);
    }
    # real entries
-   for (sort { lc $a->name cmp lc $b->name } $dir->entries->@*) {
+   for (sort { lc $a->{name} cmp lc $b->{name} } $dir->entries->@*) {
       my $is_dir= $_->{dir} || $_->{file}->is_dir;
       my $shortname= $_->{shortname} . (!$is_dir && ';1');
       my $pos= length $data;
@@ -831,9 +832,9 @@ sub _pack_directory($self, $dir) {
    }
    # verify correct size
    _round_to_whole_sector(length $data) == $dir->file->size
-      or croak "BUG: encoded directory is ".length($data)." bytes but should be ".$dir->file->size;
+      or die "BUG: encoded directory is ".length($data)." bytes but should be ".$dir->file->size;
    _round_to_whole_sector(length $joliet) == $dir->joliet_file->size
-      or croak "BUG: encoded joliet directory is ".length($data)." bytes but should be ".$dir->joliet_file->size;
+      or die "BUG: encoded joliet directory is ".length($data)." bytes but should be ".$dir->joliet_file->size;
    $dir->file->{data}= \$data;
    $dir->joliet_file->{data}= \$joliet;
 }
@@ -852,9 +853,11 @@ sub _calc_path_table_size($self) {
       my ($dir, $parent_id)= @{ $paths[$i++] };
       for my $ent ($dir->entries->@*) {
          if ($ent->{dir}) {
+            defined $ent->{path_table_size} && defined $ent->{path_table_jsize}
+               or die join(' ', %$ent);
             $size += $ent->{path_table_size};
             $jsize+= $ent->{path_table_jsize};
-            push @paths, [ $i, $ent->{dir} ]; # 1-based index, which works because ++ above
+            push @paths, [ $ent->{dir}, $i ]; # 1-based index, which works because ++ above
          }
       }
    }
@@ -887,11 +890,12 @@ sub _pack_path_tables($self) {
             @vals= ( $ent->{path_table_jsize}, 0, $ent->{dir}->joliet_file->lba, $parent_id, $jname );
             $jle .= pack 'C C V v a*', @vals;
             $jbe .= pack 'C C N n a*', @vals;
+            push @paths, [ $ent->{dir}, $i ]; # 1-based index, which works because ++ above
          }
       }
    }
    my $path_tables= $self->{path_tables};
-   croak "BUG: wrong encoded path_table size"
+   die "BUG: wrong encoded path_table size"
       unless length $le == $path_tables->{le}->size && length $be == $path_tables->{be}->size
       && length $jle == $path_tables->{jle}->size && length $jbe == $path_tables->{jbe}->size;
    $path_tables->{le}->data(\$le);
