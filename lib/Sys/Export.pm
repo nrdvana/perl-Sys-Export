@@ -536,6 +536,7 @@ sub write_file_extent($fh, $addr, $size, $data_ref, $ofs=0, $descrip=undef) {
       } else {
          my $data= pack 'a'.$size, ($avail > 0? substr($$data_ref, $ofs) : '');
          $data_ref= \$data;
+         $ofs= 0;
       }
    }
    my $wrote= syswrite($fh, $$data_ref, $size, $ofs);
