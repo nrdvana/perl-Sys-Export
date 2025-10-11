@@ -11,7 +11,7 @@ use Log::Any::Adapter 'TAP';
 
 our @EXPORT= (
    @Test2::V0::EXPORT,
-   qw( explain unindent mkfile slurp escape_nonprintable )
+   qw( explain unindent mkfile slurp escape_nonprintable hexdump )
 );
 
 # Test2 runs async by default, which messes up the relation between warnings and the test
@@ -68,6 +68,24 @@ sub slurp($name) {
    my $ret= scalar <$fh>;
    close $fh or die "close($name): $!";
    $ret;
+}
+
+sub hexdump($data) {
+   my @lines= unpack '(a16)*', $data;
+   my $skipping= 0;
+   for my $i (0..$#lines) {
+      if ($lines[$i] eq "\0"x16) {
+         $lines[$i]= $skipping? undef : '*';
+         $skipping= 1;
+      } else {
+         $skipping= 0;
+         my $ascii= $lines[$i] =~ s/[\0-\x1F\x7F-\xFF]/./gr;
+         my $hex= join ' ', unpack '(H2)*', $lines[$i];
+         $lines[$i]= sprintf "%8X  %s %s |%s|",
+            $i*16, substr($hex, 0, 23), substr($hex, 24), $ascii;
+      }
+   }
+   return join "\n", grep defined, @lines;
 }
 
 1;
