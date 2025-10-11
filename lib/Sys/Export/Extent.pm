@@ -6,6 +6,7 @@ package Sys::Export::Extent;
 use v5.26;
 use warnings;
 use experimental qw( signatures );
+use Scalar::Util qw( blessed );
 use Sys::Export qw( round_up_to_multiple :isa );
 use Carp;
 
@@ -67,6 +68,21 @@ sub new($class, %attrs) {
       $m->($self, $attrs{$_});
    }
    $self;
+}
+
+=constructor coerce
+
+  $partition= Sys::Export::GPT::Partition->new($x);
+
+If C<$x> is a hashref, construct a new Extent object.  If C<$x> is already an Extent object,
+return it.
+
+=cut
+
+sub coerce($class, $x) {
+   return $x if blessed($x) && $x->isa($class);
+   return $class->new(%$x) if isa_hash $x;
+   croak "Don't know how to coerce $x into $class";
 }
 
 =attribute name
