@@ -434,7 +434,7 @@ sub add($self, $spec) {
          !$ent->{file}? 'size=0 (empty file)'
          : $ent->{file}->is_dir? 'DIR'
          : sprintf("size=0x%X device_align=0x%X device_offset=0x%X",
-            $ent->{file}->size, $ent->{file}->align, $ent->{file}->offset)
+            $ent->{file}->size, $ent->{file}->align, $ent->{file}->device_offset)
       ))
       if $log->is_debug;
 
@@ -491,9 +491,6 @@ sub _log_hexdump($buf) {
       for 0..ceil(length($buf) / 16);
 }
 
-# This function depends on the file being pre-zeroed, which happens automatially for an empty
-# file that has just had its length changed by truncate().  This would write an invalid
-# filesystem if the handle is a block device with random leftover data in it.
 sub _write_filesystem($self, $fh, $geom, $alloc) {
    ($alloc->max_cluster_id//-1) == ($geom->max_cluster_id//-1)
       or croak "Max element of 'fat_entries' should be ".$geom->max_cluster_id.", but was ".$alloc->max_cluster_id;
@@ -721,7 +718,7 @@ sub _optimize_geometry($self) {
          my %assignment;
          unless (eval {
             $self->_alloc_file($geom, $alloc, $_)
-               for @offsets, @aligned, @others, ($geom->bits == FAT32? ($root) : ());
+               for @offsets, @aligned, @others, ($geom->bits == FAT32? ($root->file) : ());
             1
          }) {
             chomp($fail_reason{$sectors_per_cluster}= "$@");
@@ -862,7 +859,7 @@ sub _epoch_to_fat_date_time($epoch) {
    return ($fat_date, $fat_time, $fat_frac);
 }
 
-# This packs the bopot sector and all the "reserved" sectors that appear before the
+# This packs the boot sector and all the "reserved" sectors that appear before the
 # beginning of the allocation tables.
 sub _pack_reserved_sectors($self, %attrs) {
    my (@pack, @vals);
@@ -884,8 +881,10 @@ sub _pack_reserved_sectors($self, %attrs) {
    } else {
       # Did the user specify location of fsinfo?  If not, default to sector 1
       $attrs{BPB_FSInfo} //= 1;
+      $attrs{BPB_BkBootSec} //= 2;
       $attrs{BPB_FATSz16}= 0;
       $attrs{BPB_FATSz32}= $geom->fat_sector_count;
+      $attrs{BPB_RootClus}= $self->root->file->cluster;
       $attrs{BPB_TotSec16}= 0;
       $attrs{BPB_TotSec32}= $geom->total_sector_count;
       $attrs{BS_FilSysType}= "FAT";
@@ -897,12 +896,10 @@ sub _pack_reserved_sectors($self, %attrs) {
       $attrs{FSI_Nxt_Free}   //= $self->allocation_table->first_free_cluster;
       _append_pack_args(\@pack, \@vals, $fsi_ofs, \@fat32_fsinfo_fields, \%attrs);
 
-      # Backup copy of boot sector, not required.
-      if ($attrs{BPB_BkBootSec}) {
-         my $bk_ofs= $attrs{BPB_BkBootSec} * $attrs{BPB_BytsPerSec};
-         _append_pack_args(\@pack, \@vals, $bk_ofs, \@sector0_fat32_fields, \%attrs);
-         _append_pack_args(\@pack, \@vals, $bk_ofs+$fsi_ofs, \@fat32_fsinfo_fields, \%attrs);
-      }
+      # Backup copy of boot sector
+      my $bk_ofs= $attrs{BPB_BkBootSec} * $attrs{BPB_BytsPerSec};
+      _append_pack_args(\@pack, \@vals, $bk_ofs, \@sector0_fat32_fields, \%attrs);
+      _append_pack_args(\@pack, \@vals, $bk_ofs+$fsi_ofs, \@fat32_fsinfo_fields, \%attrs);
    }
    pack join(' ', @pack), @vals;
 }

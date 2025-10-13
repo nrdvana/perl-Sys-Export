@@ -389,13 +389,13 @@ Number of 32-byte directory entries in one cluster.
 
 =cut
 
-sub volume_offset { $_[0]{volume_offset} }
+sub volume_offset($self)  { $self->{volume_offset} }
 
-sub bytes_per_sector      { $_[0]{bytes_per_sector} }
-sub sectors_per_cluster   { $_[0]{sectors_per_cluster} }
-sub bytes_per_cluster     { $_[0]{bytes_per_sector} * $_[0]{sectors_per_cluster} }
-sub dirent_per_sector     { $_[0]{bytes_per_sector} / 32 }
-sub dirent_per_cluster    { $_[0]{bytes_per_sector} * $_[0]{sectors_per_cluster} / 32 }
+sub bytes_per_sector($self)    { $self->{bytes_per_sector} }
+sub sectors_per_cluster($self) { $self->{sectors_per_cluster} }
+sub bytes_per_cluster($self)   { $self->{bytes_per_sector} * $self->{sectors_per_cluster} }
+sub dirent_per_sector($self)   { $self->{bytes_per_sector} / 32 }
+sub dirent_per_cluster($self)  { $self->{bytes_per_sector} * $self->{sectors_per_cluster} / 32 }
 
 =attribute bits
 
@@ -468,18 +468,18 @@ Returns the total size in bytes of the volume.  C<< total_sector_count * bytes_p
 
 =cut
 
-sub bits                  { $_[0]{bits} }
-sub reserved_sector_count { $_[0]{reserved_sector_count} }
-sub reserved_size         { $_[0]{reserved_sector_count} * $_[0]->bytes_per_sector }
-sub fat_count             { $_[0]{fat_count} }
-sub fat_sector_count      { $_[0]{fat_sector_count} }
-sub fat_size              { $_[0]{fat_sector_count} * $_[0]->bytes_per_sector }
-sub cluster_count         { $_[0]{cluster_count} }
-sub min_cluster_id        { 2 }
-sub max_cluster_id        { $_[0]->cluster_count + 1 }
-sub root_dirent_count     { $_[0]{root_dirent_count} }
-sub root_dir_sector_count { ceil($_[0]->root_dirent_count / $_[0]->dirent_per_sector) }
-sub root_dir_size         { $_[0]->root_dir_sector_count * $_[0]->bytes_per_sector }
+sub bits($self)                  { $self->{bits} }
+sub reserved_sector_count($self) { $self->{reserved_sector_count} }
+sub reserved_size($self)         { $self->{reserved_sector_count} * $self->bytes_per_sector }
+sub fat_count($self)             { $self->{fat_count} }
+sub fat_sector_count($self)      { $self->{fat_sector_count} }
+sub fat_size($self)              { $self->{fat_sector_count} * $self->bytes_per_sector }
+sub cluster_count($self)         { $self->{cluster_count} }
+sub min_cluster_id($self)        { 2 }
+sub max_cluster_id($self)        { $self->cluster_count + 1 }
+sub root_dirent_count($self)     { $self->{root_dirent_count} }
+sub root_dir_sector_count($self) { ceil($self->root_dirent_count / $self->dirent_per_sector) }
+sub root_dir_size($self)         { $self->root_dir_sector_count * $self->bytes_per_sector }
 
 sub root_dir_start_sector($self) {
    $self->reserved_sector_count + $self->fat_count * $self->fat_sector_count

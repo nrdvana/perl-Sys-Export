@@ -85,6 +85,34 @@ subtest root_dir_math => sub {
    }
 };
 
+subtest large_deep_directory => sub {
+   for my $bits (FAT12, FAT16, FAT32) {
+      my $files= $bits == 12? 125 : $bits == 16? 625 : 8192;
+      my $expect_clusters= $files * 8 # 8 cluster per file
+                                 + 10 # 1 cluster per small directory
+              + int(($files+2+15)/16) # 1 dir of ceil((N+2)/16) sectors @ 1 sector per cluster
+            + ($bits == FAT32? 1 : 0);# in fat32, root dir gets a cluster
+
+      my $tmp= File::Temp->new;
+      my $dst= Sys::Export::VFAT->new(filehandle => $tmp, bytes_per_sector => 512, sectors_per_cluster => 1);
+      my $fourk= "\1"x4096;
+      for (1..$files) {
+         $dst->add([ file => "a/b/c/d/e/f/g/h/i/j/k/$_", \$fourk ]);
+      }
+      $dst->finish;
+
+      is( $dst->geometry,
+         object {
+            call bits          => $bits;
+            call cluster_count => $expect_clusters;
+         },
+         "$bits geometry"
+      );
+      is( -s $tmp, $dst->geometry->total_size, "$bits size" );
+      fsck($tmp);
+   }
+};
+
 subtest device_addr_placement => sub {
    my $tmp= File::Temp->new;
    my $dst= Sys::Export::VFAT->new($tmp);
@@ -104,25 +132,29 @@ subtest device_addr_placement => sub {
 
 subtest device_align_placement => sub {
    for my $align (1<<9, 1<<10, 1<<11, 1<<12, 1<<13, 1<<14) {
-      my $tmp= File::Temp->new;
-      my $dst= Sys::Export::VFAT->new($tmp);
-      my $token= "UniqueString".("0123456789"x50);
-      my $token2= "UniqueString9876543210";
+      for my $vol_ofs (0, 512, 1536) {
+         my $tmp= File::Temp->new;
+         my $dst= Sys::Export::VFAT->new($tmp);
+         my $token= "UniqueString".("0123456789"x50);
+         my $token2= "UniqueString9876543210";
 
-      $dst->add([ file => "TEST.DAT", $token, { device_align => $align }]);
-      my $f= $dst->add([ file => "TEST2.DAT", $token2, { device_align => $align*2 }]);
-      $dst->finish;
+         $dst->add([ file => "TEST.DAT", $token, { device_align => $align }]);
+         my $f= $dst->add([ file => "TEST2.DAT", $token2, { device_align => $align*2 }]);
+         $dst->volume_offset($vol_ofs);
+         $dst->finish;
+         is( $dst->geometry->volume_offset, $vol_ofs, 'final volume_offset' );
 
-      my $img= do { $tmp->seek(0,0); local $/; <$tmp> };
-      my $offset= index($img, $token);
-      my $offset2= index($img, $token2);
-      note sprintf "image is 0x%X bytes, found token at 0x%X, token2 at 0x%X, align 0x%X",
-         length($img), $offset, $offset2, $align;
+         my $img= do { $tmp->seek(0,0); local $/; <$tmp> };
+         my $offset= index($img, $token);
+         my $offset2= index($img, $token2);
+         note sprintf "image is 0x%X bytes, found token at 0x%X, token2 at 0x%X, align 0x%X",
+            length($img), $offset, $offset2, $align;
 
-      ok( $offset > 0, 'offset > 0' );
-      is( $offset & ($align-1), 0, "TEST.DAT aligned to $align" );
-      is( $offset2 & (($align*2)-1), 0, "TEST2.DAT aligned to ".($align*2) );
-      is( $f->device_offset, $offset2, 'reported location of TEST2.DAT' );
+         ok( $offset > 0, 'offset > 0' );
+         is( $offset & ($align-1), 0, "TEST.DAT aligned to $align (vol_ofs = $vol_ofs)" );
+         is( $offset2 & (($align*2)-1), 0, "TEST2.DAT aligned to ".($align*2)." (vol_ofs = $vol_ofs)" );
+         is( $f->device_offset, $offset2, 'reported location of TEST2.DAT' );
+      }
    }
 };
 
