@@ -611,13 +611,18 @@ sub _optimize_geometry($self) {
    my %seen= ( refaddr($root) => 1 );
    for my $dir ($root, values $self->{_subdirs}->%*) {
       for my $ent ($dir->entries->@*) {
-         my $file= $ent->{file};
+         # entry may have a directory ref and not a direct file ref
+         my $file= $ent->{file} //= $ent->{dir} && $ent->{dir}->file;
          next unless $file && !$seen{refaddr $file}++;
          push @{$file->device_offset? \@offsets : $file->align? \@aligned : \@others}, $file;
       }
    }
    $log->debugf("_optimize_geometry offsets=%d aligned=%d others=%d",
       scalar @offsets, scalar @aligned, scalar @others);
+   # provide stable results
+   @offsets= sort { $a->device_offset <=> $b->device_offset } @offsets;
+   @aligned= sort { fc $a->name cmp fc $b->name } @aligned;
+   @others=  sort { fc $a->name cmp fc $b->name } @others;
    my $min_ofs= min(map $_->device_offset, @offsets);
    my $max_ofs= max(map $_->device_offset + $_->size, @offsets);
    my $max_align= max(0, map $_->align, @aligned);
@@ -938,6 +943,7 @@ sub _pack_allocation_table($self, $alloc) {
 
 # This calculates the encoded size of one directory
 sub _calc_dir_size($self, $dir) {
+   # If an autovivified directoy lacks a ->{file}, create it.
    $dir->{file} //= Sys::Export::VFAT::File->new(name => $dir->name, flags => ATTR_DIRECTORY);
    my $ents= $dir->entries;
    # Need the 8.3 name in order to know whether it matches the long name
@@ -949,12 +955,6 @@ sub _calc_dir_size($self, $dir) {
       if ($_->{name} ne $_->{shortname}) {
          my $utf16= encode('UTF-16LE', $_->{name}, Encode::FB_CROAK|Encode::LEAVE_SRC);
          $n += ceil(length($utf16) / 26);
-      }
-      # If an autovivified directoy lacks a ->{file}, create it.
-      if ($_->{dir} && !$_->{file}) {
-         $_->{file}= ($_->{dir}{file} //= Sys::Export::VFAT::File->new(
-            name => $_->{dir}->name, flags => ATTR_DIRECTORY
-         ));
       }
    }
    $log->debugf("dir %s has %d real entries, %d LFN entries, size=%d ents=%s",

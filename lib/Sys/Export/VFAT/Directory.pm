@@ -236,11 +236,10 @@ the L</ent_by_name> hash.
 
 sub build_shortnames($self) {
    my $by_name= $self->ent_by_name;
-   for ($self->entries->@*) {
+   for (sort { lc $a->{name} cmp lc $b->{name} } $self->entries->@*) {
       unless (defined $_->{shortname}) {
-         $by_name->{
-            $_->{shortname}= $self->find_unused_shortname($_->{name})
-         }= $_;
+         $_->{shortname}= $self->find_unused_shortname($_->{name});
+         $by_name->{lc $_->{shortname}}= $_;
       }
    }
    return $self;

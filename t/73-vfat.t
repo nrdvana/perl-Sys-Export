@@ -113,6 +113,25 @@ subtest large_deep_directory => sub {
    }
 };
 
+subtest shortname_conflict => sub {
+   my $tmp= File::Temp->new;
+   my $dst= Sys::Export::VFAT->new($tmp);
+   $dst->add([ file => 'bitmap_scale.mod', 'test' ]);
+   $dst->add([ file => 'bitmap.mod', 'test2' ]);
+   $dst->finish;
+   # The shorter name should get ~1 because they get assigned in alphabetical order
+   like( $dst->root->entries, [
+      {
+         name => 'bitmap_scale.mod',
+         shortname => 'BITMAP~2.MOD',
+      },
+      {
+         name => 'bitmap.mod',
+         shortname => 'BITMAP~1.MOD',
+      }
+   ]) or note explain $dst->root->entries;
+};
+
 subtest device_addr_placement => sub {
    my $tmp= File::Temp->new;
    my $dst= Sys::Export::VFAT->new($tmp);
