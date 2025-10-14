@@ -214,7 +214,7 @@ sub add($self, $fileinfo) {
    } else {
       my $vfile= $self->esp->add({ %$fileinfo, device_align => ISO_SECTOR_SIZE });
       # prevent ISO9660 from assigning a LBA to this file.
-      my $ifile= $self->iso->add({ %$fileinfo, device_offset => -1 });
+      my $ifile= $self->iso->add({ %$fileinfo, data => undef, device_offset => -1 });
       push @{$self->{dual_files}}, [ $vfile, $ifile ];
       return $vfile;
    }
@@ -329,6 +329,7 @@ sub finish($self) {
    for ($self->{dual_files}->@*) {
       my ($vfile, $ifile)= @$_;
       die "BUG: unaligned file" if $vfile->device_offset % ISO_SECTOR_SIZE;
+      $ifile->size($vfile->size);
       $ifile->device_offset($vfile->device_offset);
    }
    # Now we can write the ISO9660

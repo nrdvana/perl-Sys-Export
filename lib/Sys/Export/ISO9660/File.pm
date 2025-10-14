@@ -57,7 +57,7 @@ True if the flags include C<FLAG_DIRECTORY>
 
 =cut
 
-sub alignment($self) { 2048 }
+sub block_size($self) { 2048 }
 sub mtime($self, @v) { @v? ($self->{mtime}= $v[0]) : $self->{mtime} }
 sub flags($self, @v) { @v? ($self->{flags}= $v[0]) : $self->{flags} }
 sub is_dir($self) { ($self->{flags}||0) & Sys::Export::ISO9660::FLAG_DIRECTORY() }
