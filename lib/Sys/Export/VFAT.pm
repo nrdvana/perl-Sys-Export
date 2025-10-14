@@ -111,7 +111,7 @@ sub new($class, @attrs) {
             : isa_handle $attrs[0]? ( filehandle => $attrs[0] )
             : ( filename => $attrs[0] );
    my $self= bless {}, $class;
-   $self->{root}= $self->_new_dir('(root)', undef, undef);
+   $self->{root}= $self->_new_dir('/', undef, undef);
    # keep root dir separate from subdirs
    delete $self->{_subdirs}{refaddr $self->{root}};
    # apply other attributes
@@ -354,7 +354,8 @@ sub add($self, $spec) {
             unless $ent->{dir};
       } else { # Auto-create directory. Autovivication is indicated by ->{file} = undef
          $ent= $parent->add($_, undef);
-         weaken($ent->{dir}= $self->_new_dir($parent->name."/$_", $parent, undef));
+         my $name= ($parent == $self->root? '' : $parent->name)."/$_";
+         weaken($ent->{dir}= $self->_new_dir($name, $parent, undef));
       }
       $parent= $ent->{dir};
    }
@@ -394,7 +395,7 @@ sub add($self, $spec) {
             or croak "Invalid device_offset '$offset' for file '$path'";
       }
       $file= Sys::Export::VFAT::File->new(
-         name => $path, size => $size, flags => $flags,
+         name => "/$path", size => $size, flags => $flags,
          align => $align, device_offset => $offset, data => $data_ref,
          $spec->%{qw( atime btime mtime )},
       );
@@ -406,7 +407,7 @@ sub add($self, $spec) {
       croak "Attempt to add duplicate directory $leaf"
          if $cur && $cur->{file};
       $file= Sys::Export::VFAT::File->new(
-         name => $path, size => 0, flags => $flags, $spec->%{qw( atime btime mtime )},
+         name => "/$path", size => 0, flags => $flags, $spec->%{qw( atime btime mtime )},
       );
       if ($cur) {
          $cur->{file}= $file;
@@ -426,15 +427,18 @@ sub add($self, $spec) {
    # If the dirent is a directory, also add a directory object to the dirent
    if ($file->is_dir) {
       # the directory object also gets a reference to its file object.
-      weaken($ent->{dir}= $self->_new_dir($path, $parent, $file));
+      weaken($ent->{dir}= $self->_new_dir("/$path", $parent, $file));
    }
 
    $log->debugf("added %s longname=%s shortname=%s %s",
-      $path, $ent->{name}, $ent->{shortname}, (
-         !$ent->{file}? 'size=0 (empty file)'
-         : $ent->{file}->is_dir? 'DIR'
-         : sprintf("size=0x%X device_align=0x%X device_offset=0x%X",
-            $ent->{file}->size, $ent->{file}->align, $ent->{file}->device_offset)
+      $path, $ent->{name}, $ent->{shortname}//'', join(' ',
+         !$ent->{file}? ('size=0 (empty file)')
+         : $ent->{file}->is_dir? ('DIR')
+         : (
+            (defined $ent->{file}->size? sprintf("size=0x%X", $ent->{file}->size) : 'size=<undef>'),
+            (defined $ent->{file}->align? sprintf("device_align=0x%X", $ent->{file}->align) : ()),
+            (defined $ent->{file}->device_offset? sprintf("device_offset=0x%X", $ent->{file}->device_offset) : ())
+         )
       ))
       if $log->is_debug;
 
@@ -453,6 +457,7 @@ You may get exceptions during this call if there isn't a way to write your files
 
 sub finish($self) {
    my $root= $self->root;
+   $log->debug('begin VFAT::finish');
    # Find out the size of every directory, and build ->{_allocs}, ->{_dir_allocs} and ->{_special_allocs}
    $self->_calc_dir_size($_) for $root, values $self->{_subdirs}->%*;
    # calculate what geometry gives us the best size, when rounding each file to that cluster
@@ -476,6 +481,7 @@ sub finish($self) {
    }
    # check size
    if (-s $fh < $geom->volume_offset + $geom->total_size) {
+      $log->debugf('resize output file to %s', $geom->volume_offset + $geom->total_size);
       truncate($fh, $geom->volume_offset + $geom->total_size)
          or croak "truncate: $!";
    }
@@ -483,6 +489,7 @@ sub finish($self) {
    unless ($self->filehandle) {
       $fh->close or croak "close: $!";
    }
+   $log->debug('end VFAT::finish');
    1;
 }
 
@@ -521,7 +528,7 @@ sub _write_filesystem($self, $fh, $geom, $alloc) {
       my $data= $file->data;
       # Given an inversion list describing the allocated clusters for this file,
       # write the relevant chunks of the file to those cluster data areas.
-      $log->debugf("writing '/%s' at cluster %s", $file->name, _render_invlist($invlist))
+      $log->debugf("writing '%s' at cluster %s", $file->name, _render_invlist($invlist))
          if $log->is_debug;
       my $data_ofs= 0;
       for (my $i= 0; $i < @$invlist; $i += 2) {
@@ -950,11 +957,11 @@ sub _calc_dir_size($self, $dir) {
          ));
       }
    }
-   $log->debugf("dir /%s has %d real entries, %d LFN entries, size=%d ents=%s",
+   $log->debugf("dir %s has %d real entries, %d LFN entries, size=%d ents=%s",
       $dir->name, scalar(@$ents), $n-scalar @$ents, $n*32,
-      [ map [ @{$_}{'name','shortname'} ], @$ents ] )
+      [ map +( $_->{name} eq $_->{shortname}? $_->{name} : [ @{$_}{'name','shortname'} ] ), @$ents ])
       if $log->is_debug;
-   croak "Directory /".$dir->name." exceeds maximum entry count ($n >= 65536)"
+   croak "Directory ".$dir->name." exceeds maximum entry count ($n >= 65536)"
       if $n >= 65536;
    $dir->file->{size}= $n * 32;  # always 32 bytes per dirent
 }

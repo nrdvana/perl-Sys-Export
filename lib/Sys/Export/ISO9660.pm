@@ -80,7 +80,7 @@ sub new($class, @attrs) {
             : isa_handle $attrs[0]? ( filehandle => $attrs[0] )
             : ( filename => $attrs[0] );
    my $self= bless {
-      root => Sys::Export::ISO9660::Directory->new(name => '(root)'),
+      root => Sys::Export::ISO9660::Directory->new(name => '/'),
       # Sectors 0-15 are reserved
       # + one sector for Primary Volume Descriptor
       # + one sector for Secondary Volume Descriptor
@@ -288,7 +288,7 @@ sub add_boot_catalog_entry($self, %attrs) {
    croak "require platform"
       unless defined $platform;
 
-   $extent //= Sys::Export::Extent->new(name => "(boot image for platform $platform)");
+   $extent //= Sys::Export::Extent->new(name => "Boot Catalog $platform Boot Image");
    $extent->device_offset($device_offset) if defined $device_offset;
    if (defined $data) {
       # Convert to scalar-ref if scalar
@@ -468,7 +468,8 @@ sub add($self, $spec) {
             unless $ent->{dir};
       } else { # Auto-create directory. Autovivication is indicated by ->{file} = undef
          $ent= $parent->add($_, undef);
-         weaken($ent->{dir}= $self->_new_dir($parent->name."/$_", $parent, undef));
+         my $name= ($parent == $self->root? '' : $parent->name) . "/$_";
+         weaken($ent->{dir}= $self->_new_dir($name, $parent, undef));
       }
       $parent= $ent->{dir};
    }
@@ -487,7 +488,7 @@ sub add($self, $spec) {
       } elsif (defined $data_ref) {
          $size //= length($$data_ref);
       }
-      $file= $self->_new_file($path, size => $size, flags => $flags, mtime => $spec->{mtime},
+      $file= $self->_new_file("/$path", size => $size, flags => $flags, mtime => $spec->{mtime},
                               device_offset => $offset, data => $data_ref);
    } elsif (S_ISDIR($spec->{mode})) {
       $flags |= FLAG_DIRECTORY;
@@ -496,7 +497,7 @@ sub add($self, $spec) {
       my $cur= $parent->entry($leaf);
       croak "Attempt to add duplicate directory $leaf"
          if $cur && $cur->{file};
-      $file= $self->_new_file($path, size => 0, flags => $flags, mtime => $spec->{mtime});
+      $file= $self->_new_file("/$path", size => 0, flags => $flags, mtime => $spec->{mtime});
       if ($cur) {
          $cur->{file}= $file;
          $cur->{dir}{file}= $file;
@@ -515,7 +516,7 @@ sub add($self, $spec) {
    # If the dirent is a directory, also add a directory object to the dirent
    if ($file->is_dir) {
       # the directory object also gets a reference to its file object.
-      weaken($ent->{dir}= $self->_new_dir($path, $parent, $file));
+      weaken($ent->{dir}= $self->_new_dir("/$path", $parent, $file));
    }
 
    $log->debugf("added %s longname=%s shortname=%s %s",
@@ -567,7 +568,7 @@ sub finish($self) {
 sub _write_file($fh, $file) {
    defined $file->size || defined $file->data or die "BUG: file $file->{name} has no size or data";
    my $size= _round_to_whole_sector($file->size // length ${$file->data});
-   write_file_extent($fh, $file->device_offset, $size, $file->data)
+   write_file_extent($fh, $file->device_offset, $size, $file->data, 0, $file->name)
       if $size && defined $file->data;
    $file->data(undef); # free up memory as we go, also deallocates mmaps
 }
@@ -579,16 +580,17 @@ sub _write_filesystem($self, $fh) {
    my $lba= 16;
    # Write Primary Volume Descriptor
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
-      \$self->_pack_primary_volume_descriptor);
+      \$self->_pack_primary_volume_descriptor, 0, 'Primary Volume Descriptor');
    # Write Secondary Volume Descriptor (Joliet)
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
-      \$self->_pack_joliet_volume_descriptor);
+      \$self->_pack_joliet_volume_descriptor, 0, 'Joliet Volume Descriptor');
    # Write boot catalog if present
    write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
-      \$self->_pack_boot_catalog_descriptor)
+      \$self->_pack_boot_catalog_descriptor, 0, 'Boot Catalog Descriptor')
       if $boot_catalog;
    # Volume Set Terminator
-   write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE, \"\xFFCD001\x01");
+   write_file_extent($fh, $lba++ * LBA_SECTOR_SIZE, LBA_SECTOR_SIZE,
+      \"\xFFCD001\x01", 0, 'Volume Set Terminator');
 
    # Boot catalog
    if ($boot_catalog) {
@@ -730,7 +732,7 @@ sub _calc_dir_sizes($self) {
    my @dirs= ( $self->root, values $self->{_subdirs}->%* );
    for (@dirs) {
       $_->{file}        //= $self->_new_file($_->name, flags => FLAG_DIRECTORY);
-      $_->{joliet_file} //= $self->_new_file($_->name, flags => $_->file->flags);
+      $_->{joliet_file} //= $self->_new_file($_->name . ' [J]', flags => $_->file->flags);
       # Need the 8.3 name in order to know whether it matches the long name
       $_->build_shortnames;
    }
@@ -864,10 +866,10 @@ sub _calc_path_table_size($self) {
    my sub path_table_extent($name) {
       Sys::Export::Extent->new(block_size => 2048, name => $name)
    }
-   ($self->{path_tables}{le}  //= path_table_extent('(path_table LE)'))->size($size);
-   ($self->{path_tables}{be}  //= path_table_extent('(path_table BE)'))->size($size);
-   ($self->{path_tables}{jle} //= path_table_extent('(path_table Joliet,LE)'))->size($jsize);
-   ($self->{path_tables}{jbe} //= path_table_extent('(path_table Joliet,BE)'))->size($jsize);
+   ($self->{path_tables}{le}  //= path_table_extent('Path Table [LE]'))->size($size);
+   ($self->{path_tables}{be}  //= path_table_extent('Path Table [BE]'))->size($size);
+   ($self->{path_tables}{jle} //= path_table_extent('Path Table [LE,J]'))->size($jsize);
+   ($self->{path_tables}{jbe} //= path_table_extent('Path Table [BE,J]'))->size($jsize);
 }
 
 sub _pack_path_tables($self) {
@@ -1096,7 +1098,8 @@ our @boot_catalog_entry = (
 sub _calc_boot_catalog_size($self) {
    my $boot_catalog= $self->boot_catalog
       or return 0;
-   my $extent= $boot_catalog->{extent} //= Sys::Export::Extent->new(name => '(boot catalog)');
+   my $extent= $boot_catalog->{extent}
+      //= Sys::Export::Extent->new(name => 'El Torrito Boot Catalog', block_size => 2048);
    my $size= 32;
    for my $s ($boot_catalog->{sections}->@*) {
       $size += 32 + 32 * $s->{entries}->@*;

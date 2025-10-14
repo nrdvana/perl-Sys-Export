@@ -359,7 +359,7 @@ sub path_rewrite_regex($self) {
    $self->{path_rewrite_regex} //= do {
       my $rw= $self->{path_rewrite_map} // {};
       !keys %$rw? qr/(*FAIL)/
-      : qr/(@{[ join '|', map quotemeta, reverse sort keys %{$self->{path_rewrite_map}} ]})/;
+      : qr/(@{[ join '|', map quotemeta, reverse sort keys %$rw ]})/;
    };
 }
 
