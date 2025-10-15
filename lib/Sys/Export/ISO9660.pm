@@ -1,7 +1,53 @@
 package Sys::Export::ISO9660;
 
 our $VERSION= 0; # VERSION
-# ABSTRACT: Write ISO9660 filesystems with Joliet filename and El Torrito boot record support
+# ABSTRACT: Write ISO9660 filesystems with Joliet filename and El Torrito boot catalog support
+
+=head1 SYNOPSIS
+
+  my $dst= Sys::Export::ISO9660->new(
+    filename => $path,
+  );
+  # Basic files and directories
+  $dst->add([ file => "README.TXT", "Hello World\r\n" ]);
+  
+  use Sys::Export 'filedata';
+  $dst->add([ file => 'EFI/BOOT/BOOTIA32.EFI', filedata($loader) ]);
+  
+  # Point to a file at an absolute offset from the start of the device
+  # The data is assumed to already exist in $dst->filename
+  $dst->add([ file => 'initrd', { device_offset => 0x110000 }]);
+  
+  $dst->finish;
+
+=head1 DESCRIPTION
+
+ISO9660 is the original standard for filesystems on CDROM or DVDROM.  The original standard is
+fairly limited in what characters and directory structure it allows.  It has been extended in
+numerous ways since then, including allowing longer filenames, unicode filenames, or Unix
+permissions.  This module is focused on authoring boot media, so it only supports the Joliet
+filename extension (similar to Microsoft VFAT unicode filenames) and "El Torrito" boot catalog
+for describing boot loaders for various architectures.
+
+The basic naming rules for the original ISO9660 are that files are limited to C<< [A-Z0-9_] >>,
+and at most 8 characters before a 3-character extension, and then a version
+number.  Directories may only be 8 characters without extension or version number, and the tree
+has a max depth of 8.  For widest compatibility, you should try to stay within those
+constraints.  Files have very little in the way of metadata - just a modified-time and 'hidden'
+flag.  File data may refer to ANY 2KiB-aligned extent on the entire media.
+
+The Joliet system for long filenames encodes an entire second copy of the directroy structure,
+and uses Microsoft's 16-bit litte-endian Unicode, like VFAT.  Permitted characters are much more
+relaxed, and filenames can be much longer.
+
+The El Torrito boot catalog is essentially a menu of boot options, grouped per platform.  Each
+can reference an extent of data that should be executed as a boot loader.  If there is only one
+boot option for a platform, it will be used automatically.  (But, this is all dependent on BIOS
+of the host being booted - El Torrito can describe a menu of boot options for the user to choose
+from, but BIOS needs to support rendering that menu.  You're probably better off just using one
+option that launches GRUB)
+
+=cut
 
 use v5.26;
 use warnings;
@@ -47,21 +93,6 @@ our @EXPORT_OK= qw(
    LBA_SECTOR_SIZE LBA_SECTOR_POW2 BOOT_X86 BOOT_PPC BOOT_MAC BOOT_EFI
    EMU_NONE EMU_FLOPPY12 EMU_FLOPPY144 EMU_FLOPPY288 EMU_HDD
 );
-
-=head1 SYNOPSIS
-
-  my $dst= Sys::Export::ISO9660->new(
-    filename => $path,
-  );
-  # Basic files and directories
-  $dst->add([ file => "README.TXT", "Hello World\r\n" ]);
-  $dst->add([ file => 'EFI/BOOT/BOOTIA32.EFI', { data_path => $loader }]);
-  
-  # Point to a file at an absolute offset from the start of the device
-  # The data is assumed to already exist in $dst->filename
-  $dst->add([ file => 'initrd', { device_offset => 0x110000 }]);
-  
-  $dst->finish;
 
 =constructor new
 
@@ -247,14 +278,14 @@ Structure:
             media_type   => # EMU_NONE, EMU_FLOPPY12, EMU_FLOPPY144, EMU_FLOPPY288, EMU_HDD
             load_segment => # 0x0000=no-emul, 0x07C0=floppy
             system_type  => # MBR partition type byte, 0xEF for EFI ESP
-            file         => # ISO9660::File object, holds device_offset and size and data
+            extent       => # Sys::Export::Extent object, holds device_offset and size and data
           },
           ...
         ]
       },
       ...
     ],
-    file => $iso966o_file_obj, # lazy-built
+    file => $iso9660_file_obj, # lazy-built
   }
 
 =cut
@@ -275,6 +306,11 @@ sub boot_catalog { $_[0]{boot_catalog} }
     size              => # initialize extent->size
     data              => # initialize extent->data
   );
+
+This function is a convenient way to build the C<boot_catalog> data structure.  C<platform> is
+required, and triggers creation of a new section if there isn't a section for that platform yet.
+The C<extent> is also required to be defined before L</finish> is called, but you can delay
+initializing it if you don't know what extent you'll be using, yet.
 
 =cut
 
@@ -345,7 +381,7 @@ sub add_boot_catalog_entry($self, %attrs) {
 =attribute default_time
 
 This unix timestamp will be used for any date field that wasn't specified elsewhere.  If not set
-when C</finalize> is called, it will default to the current time().
+when C</finish> is called, it will default to the current time().
 
 =cut
 
@@ -631,9 +667,9 @@ free sectors.  This should only be called after every file and boot entry have b
 
 The return value is the total size (bytes) of everything seen.  This includes partitions
 referenced by the L</boot_catalog>.  You can exclude boot_catalog entries by setting
-C<< extent_lba = -1 >> before the call, then updating to the real value before L</finish>.
+C<< start_lba = -1 >> before the call, then updating to the real value before L</finish>.
 
-ISOHybrid calls this with all the files owned by VFAT set to C<< extent_lba = -1 >> so that
+ISO9660Hybrid calls this with all the files owned by VFAT set to C<< start_lba = -1 >> so that
 it can determine how many initial sectors are used, and know where to start the VFAT
 filesystem, after which it revises all the shared files to point to extents within
 the VFAT filesystem.
