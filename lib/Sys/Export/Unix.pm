@@ -694,6 +694,11 @@ sub add {
       }
       $self->log->debug("Exporting".(defined $file{src_path}? " $file{src_path}" : '').(defined $file{name}? " to $file{name}":''))
          if $self->log->is_debug;
+      # Need to abs-path the parent dir of this path in case src_path follows
+      # symlinks through absolute paths, e.g. "/usr/bin/mount", if /usr/bin is a symlink to
+      # "/bin" rather than "../bin" it will fail whenever ->src is not pointed to '/'.
+      $file{real_src_path} //= $self->_src_parent_abs_path($file{src_path})
+         if defined $file{src_path};
       # Translate src to dst if user didn't supply a 'name'
       if (!defined $file{name} || !defined $file{mode}) {
          my $src_path= $file{src_path};
@@ -703,10 +708,7 @@ sub add {
             $self->log->debugf("  (already exported '%s')", $src_path);
             next;
          }
-         # Need to immediately abs-path the parent dir of this path in case src_path follows
-         # symlinks through absolute paths, e.g. "/usr/bin/mount", if /usr/bin is a symlink to
-         # "/bin" rather than "../bin" it will fail whenever ->src is not pointed to '/'.
-         my $real_src_path= $file{real_src_path} // $self->_src_parent_abs_path($src_path);
+         my $real_src_path= $file{real_src_path};
          if (!defined $real_src_path) {
             croak "No such path $src_path";
          } elsif ($real_src_path ne $src_path) {
@@ -737,6 +739,8 @@ sub add {
          $self->{src_path_set}{$real_src_path}= $file{name};
          $self->{src_path_set}{$src_path}= $file{name} if $real_src_path ne $src_path;
       }
+      $file{data_path}= $self->{src_abs} . $file{real_src_path}
+         if !defined $file{data} && !defined $file{data_path} && -e $self->{src_abs} . $file{real_src_path};
       $file{nlink} //= 1;
 
       if (defined $file{user} && !defined $file{uid}) {
