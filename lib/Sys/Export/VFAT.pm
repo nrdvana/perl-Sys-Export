@@ -179,6 +179,15 @@ sub volume_offset($self, @val) {
    $self->{volume_offset} // 0
 }
 
+=attribute min_bits
+
+Setting this to 32 enforces the generated filesystem will be FAT32 rather than FAT16 or FAT12.
+FAT32 has a minimum disk size of about 32MiB, so this has the side effect of forcing a minimum
+number of clusters, which may result in a lot of unused space in the generated filesystem.
+But, FAT32 is structurally different from FAT12/16 (such as having arbitrary number of reserved
+sectors at the start of the image, used for things like boot loaders) and you might require
+that even at the expense of wasted space.
+
 =attribute bytes_per_sector
 
 Force a sector size other than the default 512.
@@ -203,6 +212,14 @@ some free space to the generated filesystem.
 Volume label of the generated filesystem
 
 =cut
+
+sub min_bits($self, @val) {
+   if (@val) {
+      croak "Geometry already decided" if $self->{geometry};
+      $self->{min_bits}= $val[0];
+   }
+   $self->{min_bits}
+}
 
 sub bytes_per_sector($self, @val) {
    if ($self->{geometry}) {
@@ -707,6 +724,7 @@ sub _optimize_geometry($self) {
             fat_count              => $self->fat_count,
             cluster_count          => $clusters,
             used_root_dirent_count => $root_dirent_used,
+            min_bits               => $self->min_bits,
          );
          $log->debugf("testing clusters=%d size=0x%X data_region=0x%X-%X min_ofs=0x%X max_ofs=0x%X",
             $clusters, $cluster_size, $geom->data_start_device_offset, $geom->data_limit_device_offset,
