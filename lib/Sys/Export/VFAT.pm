@@ -904,7 +904,7 @@ sub _pack_reserved_sectors($self, %attrs) {
       
       # FSInfo struct, location is configurable
       my $fsi_ofs= $attrs{BPB_FSInfo} * $attrs{BPB_BytsPerSec};
-      $attrs{FSI_Free_count} //= $self->allocation_table->free_cluster_count;
+      $attrs{FSI_Free_Count} //= $self->allocation_table->free_cluster_count;
       $attrs{FSI_Nxt_Free}   //= $self->allocation_table->first_free_cluster;
       _append_pack_args(\@pack, \@vals, $fsi_ofs, \@fat32_fsinfo_fields, \%attrs);
 

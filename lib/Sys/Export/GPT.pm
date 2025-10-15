@@ -339,7 +339,7 @@ sub write_to_file($self, $fh) {
    my $entries_crc= _crc32($entries_data);
    
    # Write protective MBR at LBA 0, but don't alter first 446 bytes of boot loader
-   write_file_extent($fh, 446, $bs,
+   write_file_extent($fh, 446, $bs-446,
       \$self->_pack_protective_mbr($max_lba), 446, 'Protective MBR');
    
    # Write primary GPT header at LBA 1
