@@ -99,7 +99,7 @@ sub name($self) { $self->{name} // 'extent' }
 
 sub block_size($self, @v) {
    if (@v) {
-      croak "Not a power of 2" unless isa_pow2 $v[0];
+      croak "block_size $v[0] not a power of 2" unless isa_pow2 $v[0];
       $self->{block_size}= $v[0];
    }
    $self->{block_size} // 512;
@@ -117,7 +117,7 @@ location in the image)
 
 sub size($self, @v) {
    if (@v) {
-      croak "Sector length of ".$self->name." changed after choosing LBA"
+      croak "Attempt to change ector length of ".$self->name." after choosing LBA"
          if ($self->{size} // 0) > 0 && ($self->device_offset // -1) >= 0
             && round_up_to_multiple($v[0], $self->block_size) != round_up_to_multiple($self->{size}, $self->block_size);
       $self->{size}= $v[0];
@@ -136,7 +136,7 @@ that yet.
 
 sub device_offset($self, @v) {
    if (@v) {
-      croak "Not a multiple of ".$self->block_size
+      croak "device_offset $v[0] not a multiple of ".$self->block_size
          if ($v[0]//0) > 0 && ($v[0] & ($self->block_size-1));
       $self->{device_offset}= $v[0];
    }
@@ -193,7 +193,7 @@ L<LazyFileData|Sys::Export::LazyFileData> object.
 
 sub data($self, @v) {
    if (@v) {
-      croak "Not a scalar-ref or LazyFileData object"
+      croak "data must be a scalar-ref or LazyFileData object"
          if defined $v[0] && !isa_data_ref $v[0];
       $self->{data}= $v[0];
    }

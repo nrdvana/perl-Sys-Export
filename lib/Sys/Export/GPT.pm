@@ -6,6 +6,7 @@ package Sys::Export::GPT;
 use v5.26;
 use warnings;
 use experimental qw( signatures );
+use Scalar::Util qw( blessed );
 use List::Util qw( min max );
 use Encode;
 use Sys::Export::LogAny '$log';
@@ -250,9 +251,24 @@ sub choose_missing_geometry($self, $device_size= undef) {
    for (grep defined, @$pttn) {
       round_up_to_multiple($lba_pos, $block_align) if $block_align > 1;
       $_->block_size($self->block_size);
-      $_->start_lba($lba_pos) unless defined $_->start_lba;
-      croak "No end_lba for partition ".$_->name
-         unless defined $_->end_lba;
+      if (defined $_->start_lba) {
+         croak "Partition ".$_->name." start_lba ".$_->start_lba." < first_block ".$self->first_block
+            if $_->start_lba < $self->first_block;
+      } else {
+         $_->start_lba($lba_pos);
+      }
+      unless (defined $_->end_lba) {
+         # Choose based on data size, if available
+         if ($_->data) {
+            my $s= blessed($_->data)? $_->data->size : length ${$_->data};
+            $_->size(round_up_to_multiple($s, $self->block_size));
+            $log->debugf("set partition '%s' size to %d based on data length %d",
+               $_->name, $_->size, $s);
+         } else {
+            croak "No end_lba for partition ".$_->name
+         }
+      }
+      $log->debugf("partition '%s' start=0x%X end=0x%X", $_->name, $_->start_lba, $_->end_lba);
       $lba_pos= $_->end_lba + 1 if $_->end_lba >= $lba_pos;
    }
    my $max_part_lba= $lba_pos-1;
