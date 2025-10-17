@@ -28,7 +28,7 @@
    .code16
    .globl _start
 
-_start:
+_start = 0x7C00
    cli
    /* Normalize CS:IP to 0000:7c00 */
    ljmp    $0, $start
@@ -240,19 +240,19 @@ halt:
 
 # Data section
 msg_MBR:
-   .asciz "MBR "
+   .asciz "MBR->"
 msg_GPT:
-   .asciz "GPT "
+   .asciz "GPT->"
 msg_ENT:
    .asciz "["
 msg_FROM:
-   .asciz "] FROM "
+   .asciz "]: "
 msg_plus:
    .asciz " +"
 msg_LOADED:
    .asciz " LOADED\n"
 msg_ERR:
-   .asciz "<!>"
+   .asciz "!"
 
 # GRUB BIOS boot partition GUID: "Hah!IdontNeedEFI"
 guid:
