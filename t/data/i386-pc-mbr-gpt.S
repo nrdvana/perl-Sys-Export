@@ -30,11 +30,11 @@
 
 _start = 0x7C00
    cli
-   /* Normalize CS:IP to 0000:7c00 */
+   # Normalize CS:IP to 0000:7c00
    ljmp    $0, $start
 
 start:
-   /* Set up segments and stack */
+   # Set up segments and stack
    xorw %ax, %ax
    movw %ax, %ds
    movw %ax, %ss
@@ -61,15 +61,18 @@ start:
    call read_disk
 
    # Sanity check, must start with "EFI "
-   cmpl $0x5f494645, %es:0
+   cmpl $0x20494645, %es:0
    jne error
    
    # Calculate sectors needed for partition entries
    movl %es:0x50, %eax  # number of entries
    movl %es:0x54, %ecx  # size of entry
    # sanity check, normally 128 but at most needs to fit in 16 bit
-   cmpl $0x8000, %ecx
-   ja error
+#   cmpl $0x8000, %ecx
+#   ja error
+   movl %ecx, %ebx
+   shrl $15, %ebx
+   jnz error
    movl %ecx, GPT_ENT_SIZE(%bp)  # save entry size
    mull %ecx                     # total bytes needed
    movl %eax, GPT_ENT_TOTAL(%bp) # save total bytes
@@ -94,7 +97,7 @@ search_loop:
    cmpl	GPT_ENT_TOTAL(%bp), %ebx
    jae	error
 
-   /* Compare 16-byte GUID */
+   # Compare 16-byte GUID
    movw	%bx,   %di
    movw	$guid, %si
    movw	$16,   %cx
@@ -118,15 +121,15 @@ found_partition:
 
    # Get first LBA (offset 32) and last LBA (offset 40)
    popw %bx
-   pushl %es:32(%bx)  # first LBA-low
-   pushl %es:36(%bx)  # first LBA-high
-   popl INT13_DAP_LBA_HIGH(%bp)
-   popl INT13_DAP_LBA_LOW(%bp)
+   movl %es:36(%bx), %eax   # first LBA-high
+   movl %eax, INT13_DAP_LBA_HIGH(%bp)
+   movl %es:32(%bx), %eax   # first LBA-low
+   movl %eax, INT13_DAP_LBA_LOW(%bp)
    movl	%es:40(%bx), %ecx   # last LBA-low
 
    # Calculate sector count = last - first + 1
    # 64 bit subtraction would be awkward, and certainly safe to assume that
-   # size of GRUB partition is less tahtn 2TB.  We clamp it anyway.
+   # size of GRUB partition is less than 2TB.  We clamp it anyway.
    subl	%eax, %ecx
    incl	%ecx
 
@@ -134,7 +137,7 @@ found_partition:
    movl	%ecx, %edx
    shrl	$10, %edx
    jz	load_partition
-   movl	$1024, %ecx
+   movw	$1024, %cx
 load_partition:
    pushw %cx
 
@@ -197,8 +200,7 @@ chunk_ok:
    jmp	read_loop
 read_done:
    popw %si
-   call print
-   ret
+   # fall into print routine to print success message
 
 # Print null-terminated string
 # Input: %si = string pointer
@@ -218,8 +220,8 @@ print_done:
 print_eax:
    lea    (DIGIT_BUF + 11)(%bp), %si  # si points to end of DIGIT_BUF[10 digits + NUL]
    movb   $0, (%si)          # store NUL terminator
-print_eax_next_digit:
    movl   $10, %ebx
+print_eax_next_digit:
    xorl   %edx, %edx
    divl   %ebx               # divide EAX by 10; quotient in EAX, remainder in EDX
    addb   $'0', %dl          # convert remainder to ASCII
@@ -227,8 +229,7 @@ print_eax_next_digit:
    movb   %dl, (%si)
    testl  %eax, %eax
    jnz    print_eax_next_digit
-   call   print              # print null-terminated string in si
-   ret
+   jmp    print              # print null-terminated string in si
 
 # Error handler - print '<!>' and halt
 error:
@@ -250,9 +251,9 @@ msg_FROM:
 msg_plus:
    .asciz " +"
 msg_LOADED:
-   .asciz " LOADED\n"
+   .asciz " LOADED\r\n"
 msg_ERR:
-   .asciz "!"
+   .asciz "!\r\n"
 
 # GRUB BIOS boot partition GUID: "Hah!IdontNeedEFI"
 guid:
