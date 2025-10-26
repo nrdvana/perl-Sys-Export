@@ -8,20 +8,18 @@
 ; This implementation supports reading the partition from a 64-bit LBA, and
 ; provides some status feedback as it loads.
 ;
-; It first loads sector 1 of the boot disk at address 0x8000
-; It then verifies it is looking at GPT, then loads the partition table.
-; It iterates partition entries until it finds the ESP partition type GUID.
-; It then loads the first sector of that partition to address 0x8000 and
-; executes it, which is presumably a stage 1.5 installed in the FAT16/32
-; first sector.
+; It searches multiple BIOS drives (0x80-0x87) for an ESP partition, allowing
+; the MBR to be written to all disks for redundancy.
 
-BOOT_KERNEL_ADDR equ 0x8000
+DEFAULT_MBR_ADDR equ 0x7C00
+CLONED_MBR_ADDR  equ 0x7A00
 
 ; Frame pointer offsets for local variables
 BOOT_STACK_OFS equ 0x6000 ; local vars upward, stack downward from here
 BOOT_DRIVE     equ 0x00   ; initial value of DX
-ENT_STEP       equ 0x02   ; size of one GPT entry / 16
-ENT_STOP       equ 0x04   ; size of entire GPT partition table / 16
+CURRENT_DRIVE  equ 0x02   ; current drive being tried
+ENT_STEP       equ 0x04   ; size of one GPT entry / 16 (16 bits)
+ENT_STOP       equ 0x06   ; size of entire GPT partition table / 16 (16 bits)
 DIGIT_BUF      equ 0x08   ; Buffer for int-to-string conversion
 
 ; int 13h DiskAddressParams struct fields
@@ -41,39 +39,49 @@ GPT_ENTRY_LBA_FIRST  equ 0x20 ; (64-bit)
 GPT_ENTRY_LBA_LAST   equ 0x28 ; (64-bit)
 
 [BITS 16]
-[ORG 0x7C00]
+[ORG CLONED_MBR_ADDR] ; this will be true at start:, but not _start:
 
 _start:
+   ; BIOS loads this at 0x7C00, but this will chain to another boot loader
+   ; which will also expect to be at 0x7C00, so move all the code backward
+   ; 512 bytes and resume execution there.
    cli
-   jmp 0:start ; Normalize CS:IP to 0000:7c00
-start:
-   ; Set up segments and stack
    xor ax, ax
    mov ds, ax
    mov ss, ax
-   mov bp, BOOT_KERNEL_ADDR ; es will point to the data we load with IN13h AH=42h
-   mov es, bp
-   mov sp, BOOT_STACK_OFS   ; Stack downward from BOOT_STACK_OFS
-   mov bp, sp               ; Local vars upward from BOOT_STACK_OFS
-   sti
-   
-   ; Save boot drive
+   mov es, ax
+   mov si, DEFAULT_MBR_ADDR
+   mov di, CLONED_MBR_ADDR
+   mov cx, 256 ; 256 words = 512 bytes
+   rep movsw
+   mov bp, BOOT_STACK_OFS   ; Local vars upward from BOOT_STACK_OFS
+   ; Save boot drive and initialize current drive
    mov [bp+BOOT_DRIVE], dx
-   ; Print boot drive "$N:MBR" to show we started, and from which BIOS disk
+   jmp 0:start ; Normalize CS:IP to 0000:7A00
+
+start: ; This is also a jump target for when the ESP wasn't found on the
+       ; bios-supplied BOOT_DRIVE, and dx will have the next drive number
+       ; to test.  Jumps to try_next_drive may occur during function calls,
+       ; so jumping to before the stack gets initialized solves that.
+   mov [bp+CURRENT_DRIVE], dx
+   mov sp, BOOT_STACK_OFS   ; Stack downward from BOOT_STACK_OFS
+   sti
+
+   ; Print boot drive "$N:MBR" to show which disk we're trying
    mov ax, dx
    call print_ax 
    mov si, msg_MBR
    call print
    
    ; Read GPT header (LBA 1)
-   ; construct this first DAP struct backward on stack
    xor edx, edx  ; LBA high = 0
    xor eax, eax
    inc ax        ; LBA low  = 1
    mov cx, ax    ; count = 1
    mov si, msg_GPT ; "$N:MBR GPT" <-- 'GPT' means loaded sector 1
+   mov ax, DEFAULT_MBR_ADDR ; es will point to the data we load with IN13h AH=42h
+   mov es, ax
    call read_disk
-   ; read_disk always loads cx sectors to es:0
    
    ; Sanity check, must start with "EFI PART"
    mov di, 0
@@ -102,20 +110,20 @@ start:
    mov cx, ax                         ; sector count
    mov eax, [es:GPT_HEADER_TBL_LBA]   ; LBA low
    mov edx, [es:GPT_HEADER_TBL_LBA+4] ; LBA high
-   mov di, msg_ENT                    ; "$N:MBR GPT:" <-- colon means we loaded the table
+   mov si, msg_ENT                    ; "$N:MBR GPT:" <-- colon means we loaded the table
    call read_disk
-   ; read_disk always loads cx sectors to es:0
-   ; and sets si and di to zero
    
+   ; Search for ESP partition.  Iterate es because table could theoretically be larger than 64K
+   ; Iterating the segment keeps all numbers 16-bit.
    ; for (es= 0; es < ent_stop; es += ent_step) {
    push es
    xor ax, ax
 search_loop:
    cmp ax, [bp+ENT_STOP]
-   jae error
+   jae error               ; end of entries, ESP not found
    ; Compare 16-byte GUID
    mov es, ax
-   xor di, di
+   mov di, 0
    mov si, efi_type_guid
    mov cx, 16
    repe cmpsb
@@ -135,20 +143,21 @@ found_partition:
    mov edx, [es:GPT_ENTRY_LBA_FIRST+4] ; LBA-high
    mov cx, 1                           ; 1 sector
    pop es ; restore it after using as loop variable
-   mov di, msg_LOADED ; final message reads "$n:MBR GPT:$i LOADED\r\n"
+   mov si, msg_LOADED ; final message reads "$n:MBR GPT:$i LOADED\r\n"
    call read_disk
 
 boot_stage2:
    ; Jump to stage 1.5 with boot drive in DX
    push word 0
    pop es ; in case stage 1.5 cares
-   mov dx, [bp+BOOT_DRIVE]
-   jmp 0:BOOT_KERNEL_ADDR
+   mov dx, [bp+CURRENT_DRIVE]  ; Pass the drive we found ESP on
+   jmp 0:DEFAULT_MBR_ADDR
 
 ; Read disk using INT 13h AH=42h (LBA) and store at es:0
 ; Input:  edx:eax = LBA Address to load
 ;         cx = nonzero total sector count (16-bit)
 ;         si = address of message to display on success
+; Output: CF set on error, clear on success
 read_disk:
    push si
    ; Initialize DAP struct on stack
@@ -168,7 +177,7 @@ chunk_ok:
    push cx
    
    ; Perform read
-   mov dx, [bp+BOOT_DRIVE]
+   mov dx, [bp+CURRENT_DRIVE]
    mov ah, 0x42
    int 0x13
    jc error
@@ -188,21 +197,19 @@ chunk_ok:
 read_done:
    add sp, 16  ; remove DAP struct
    pop si
-   ; fall into print routine to print success message
+   jmp print   ; print success message
 
 ; Print null-terminated string
 ; Input: si = string pointer
-print:
-print_next_ch:
-   lodsb
-   test al, al
-   jz print_done
+; Output: CF cleared
+print_ch:
    mov bx, 0x0001
    mov ah, 0x0e
    int 0x10
-   jmp print_next_ch
-
-print_done:
+print:
+   lodsb
+   test al, al
+   jnz print_ch
    ret
 
 ; Print each digit of AX in decimal
@@ -224,12 +231,18 @@ print_eax_next_digit:
    jnz print_eax_next_digit
    jmp print                  ; print null-terminated string in si
 
-; Error handler - print '!' and halt
+; Error handler - print '!\r\n' and either try next drive or report failure to bios
 error:
    mov si, msg_ERR
    call print
+   ; If drive + 1 mod 16 is the same we started on, give up
+   mov dx, [bp+CURRENT_DRIVE]
+   inc dx
+   and dx, 0x8F
+   cmp dx, [bp+BOOT_DRIVE]
+   jne start
+   ; All drives failed
    int 0x18                   ; BIOS boot failure
-
 halt:
    jmp halt
 
