@@ -311,7 +311,7 @@ sub isa_export_dst :prototype($) { blessed($_[0]) && $_[0]->can('add') && $_[0]-
 sub isa_userdb     :prototype($) { blessed($_[0]) && $_[0]->can('user') && $_[0]->can('group') }
 sub isa_user       :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::User') }
 sub isa_group      :prototype($) { blessed($_[0]) && $_[0]->isa('Sys::Export::Unix::UserDB::Group') }
-sub isa_pow2       :prototype($) { $_[0] == round_up_to_pow2($_[0]-1) }
+sub isa_pow2       :prototype($) { !($_[0] & ($_[0]-1)) }
 sub isa_data_ref   :prototype($) { ref $_[0] eq 'SCALAR' || blessed($_[0]) && $_[0]->can('as_scalarref') }
 
 =head2 C<:stat_modes> bundle
@@ -408,17 +408,22 @@ sub expand_stat_shorthand {
 
   $pow2= round_up_to_pow2($number);
 
-Return a number rounded up to the next power of 2
+Return a number rounded up to the next power of 2, or itself if it was already a power of 2.
+Dies if the number is less than 0.  Returns 1 when C<$number> is 0.
 
 =head2 round_up_to_multiple
 
   $aligned= round_up_to_multiple($n, $pow2);
 
 Return a number rounded up to the next multiple of a power of 2.
+Dies if the number is less than 0.
 
 =cut
 
 sub round_up_to_pow2($n) {
+   croak "Not defined for negative numbers" unless $n > 0;
+   return 1 if $n <= 1;
+   --$n;
    $n |= $n >> 1;
    $n |= $n >> 2;
    $n |= $n >> 4;
@@ -429,6 +434,7 @@ sub round_up_to_pow2($n) {
 }
 
 sub round_up_to_multiple($n, $pow2) {
+   croak "Not defined for negative numbers" unless $n > 0;
    my $mask= $pow2-1;
    return ($n + $mask) & ~$mask;
 }
