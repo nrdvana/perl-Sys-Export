@@ -740,7 +740,8 @@ sub add {
          $self->{src_path_set}{$src_path}= $file{name} if $real_src_path ne $src_path;
       }
       $file{data_path}= $self->{src_abs} . $file{real_src_path}
-         if !defined $file{data} && !defined $file{data_path} && -e $self->{src_abs} . $file{real_src_path};
+         if !defined $file{data} && !defined $file{data_path} && defined $file{real_src_path}
+            && -e $self->{src_abs} . $file{real_src_path};
       $file{nlink} //= 1;
 
       if (defined $file{user} && !defined $file{uid}) {
