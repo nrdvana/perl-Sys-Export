@@ -21,11 +21,13 @@ if (eval 'use Log::Any 1.051; 1') {
 } else {
    *get_logger= sub { bless {}, 'Sys::Export::LogAny::_Logger'; };
    *import= sub {
-      for (@_[1..$#_]) {
+      my $class= shift;
+      for (@_) {
          if ($_ eq '$log') {
-            no strict 'refs';
             my $caller= caller;
-            ${$caller . '::log'}= bless {}, 'Sys::Export::LogAny::_Logger';
+            my $logger= $class->get_logger($caller);
+            no strict 'refs';
+            *{$caller . '::log'}= \$logger;
          }
          else { die "Can't export '$_'"; }
       }
