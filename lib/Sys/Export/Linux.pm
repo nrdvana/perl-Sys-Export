@@ -90,11 +90,14 @@ sub _trace_deps_linux_strace($self, @argv) {
       $self->{_log_trace}->("Reading strace output") if $self->{_log_trace};
       while (<$r>) {
          $self->{_log_trace}->($_) if $self->{_log_trace};
-         $deps{$1}= 1 if /^open(?:at)?\(.*?"(.*?)",.*?= [1-9]/;
+         $deps{$1}= 1 if /^open(?:at)?\(.*?"(.*?)",.*?= [0-9]/;
       }
       $self->{_log_trace}->("Done reading strace") if $self->{_log_trace};
       waitpid($pid,0);
-      $self->{_log_trace}->("Command exited with $?") if $self->{_log_trace};
+      my $wstat= $?;
+      $self->{_log_trace}->("Command exited with $wstat") if $self->{_log_trace};
+      croak "straced command failed: wstat = $wstat"
+         if $wstat;
       return \%deps;
    }
 }

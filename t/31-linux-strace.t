@@ -22,11 +22,16 @@ my $exporter= Sys::Export::Linux->new(src => "/", dst => $dst);
 skip_all "strace not supported in this environment"
    unless $exporter->_can_trace_deps;
 
-$exporter->add(abs_path(__FILE__));
+# The exporter is most likely to detect /usr/bin/perl as the interpreter for
+# this script, which might not be the interpreter we're currently using to
+# run the tests.  So the script needs to depend only on things that would
+# exist for *every* perl interpreter.
+
+$exporter->add(abs_path(__FILE__) =~ s{[^/]+\z}{data/simple-perl-script.pl}r);
 
 note "dep: $_" for keys $dst->files->%*;
 
-ok( scalar(grep m{Sys/Export/Linux.pm\z}, keys $dst->files->%*), 'Saw dep Sys/Export/Linux.pm' );
-ok( scalar(grep m{t/lib/Test2AndUtils.pm\z}, keys $dst->files->%*), 'Saw dep Test2AndUtils.pm' );
+ok( scalar(grep m{strict.pm\z}, keys $dst->files->%*), 'Saw dep strict.pm' );
+ok( scalar(grep m{warnings.pm\z}, keys $dst->files->%*), 'Saw dep warnings.pm' );
 
 done_testing;
