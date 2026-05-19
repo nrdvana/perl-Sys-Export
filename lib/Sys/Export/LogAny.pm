@@ -48,7 +48,7 @@ package Sys::Export::LogAny::_Logger {
       print STDERR join(' ', @msg)."\n"
    }
    sub infof($self, $fmt, @args) {
-      printf STDERR $fmt."\n", map +(ref? _dump($_) : $_), @args;
+      printf STDERR $fmt."\n", map +(ref? _dump($_) : defined? $_ : '(undef)'), @args;
    }
    *error = *warn  = *notice = *info;
    *errorf= *warnf = *noticef= *infof;
