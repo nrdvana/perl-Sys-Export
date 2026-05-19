@@ -1203,7 +1203,8 @@ sub process_elf_file($self, $file, $notes) {
 A variant of L</process_file> for any file with "#!/..." interpreter.
 
 This adds the interpreter to the export queue, and also may dispatch to a more specialized
-processing method.
+processing method.  If the interpreter is in a rewritten path, this also alters the script in
+C<< ->{data} >> to refer to the destination interpreter path.
 
 =cut
 
@@ -1215,14 +1216,15 @@ sub process_script_file($self, $file, $notes) {
    if ($self->_has_rewrites) {
       # rewrite the interpreter, if needed
       my $rre= $self->path_rewrite_regex;
-      if ($interp =~ s,^$rre,$self->{path_rewrite_map}{$1},e) {
+      my $dst_interp= $interp;
+      if ($dst_interp =~ s,^$rre,$self->{path_rewrite_map}{$1},e) {
          # note file->{data} could be a read-only memory map
-         my $data= ${$file->{data}} =~ s,^(#!\s*)(\S+),$1/$interp,r;
+         my $data= ${$file->{data}} =~ s,^(#!\s*)(\S+),$1/$dst_interp,r;
          $file->{data}= \$data;
          push @$notes, '+rewrite interpreter';
       }
    }
-   if ($interp =~ m,/env\z,) { # /usr/bin/env, request for interpreter from $PATH...
+   if ($interp =~ m,^(usr/)?bin/env\z,) { # /usr/bin/env, request for interpreter from $PATH...
       my ($name)= (${$file->{data}} =~ m,^#!\s*/\S+\s*(\S+),)
          or return;
       if (defined (my $path= $self->src_which($name))) {
