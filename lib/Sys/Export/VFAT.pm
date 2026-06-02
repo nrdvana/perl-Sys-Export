@@ -26,7 +26,7 @@ use constant {
 use Exporter 'import';
 our @EXPORT_OK= qw( FAT12 FAT16 FAT32 ATTR_READONLY ATTR_HIDDEN ATTR_SYSTEM ATTR_ARCHIVE
   ATTR_VOLUME_ID ATTR_DIRECTORY is_valid_longname is_valid_shortname is_valid_volume_label
-  build_shortname );
+  build_shortname remove_invalid_shortname_chars );
 use Sys::Export qw( isa_hash isa_array isa_handle isa_int isa_pow2 expand_stat_shorthand write_file_extent );
 use Sys::Export::VFAT::Geometry qw( FAT12 FAT16 FAT32 );
 require Sys::Export::VFAT::AllocationTable;
@@ -150,6 +150,11 @@ The root L<Directory|Sys::Export::VFAT::Directory> object.
 An instance of L<Sys::Export::VFAT::Geometry> that describes the size and location of VFAT
 structures.  This is generated during L</finish>, but if you have very rigid ideas about how
 the filesystem should be laid out, you can pass it to the constructor.
+
+=attribute allocation_table
+
+An instance of L<Sys::Export::VFAT::AllocationTable> used to track which clusters have been
+allocated.
 
 =attribute volume_offset
 
@@ -580,6 +585,13 @@ Allows space characters in the name, even though most DOS tools can't handle tha
   $bool= is_valid_volume_label($name)
 
 C<$name> should be encoded as platform-native bytes, with no codepoints above 0xFF.
+
+=export remove_invalid_shortname_chars
+
+  $name= remove_invalid_shortname_chars($name, $replacement='_')
+
+Coerce an arbitrary string to characters valid as a FAT short name, uppercasing any
+lowercase ASCII and replacing illegal characters with '_' or the character of your choice.
 
 =cut
 

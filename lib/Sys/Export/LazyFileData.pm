@@ -53,6 +53,10 @@ sub new($class, $src, $offset=0, $size=undef) {
    return bless [ undef, $src, $offset, $size, $abs ], $class;
 }
 
+=attribute source
+
+The source of the data; either a scalarref or filename.
+
 =attribute abs_path
 
 The absolute pathname from which the file data is being read.  This can be C<undef> if the file
@@ -70,7 +74,7 @@ The number of bytes of data that will be returned (clamped to file size)
 
 Returns the content of the range of the file
 
-=method as_ref
+=method as_scalarref
 
 Returns the content of the range of the file as a scalar ref
 

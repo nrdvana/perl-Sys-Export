@@ -290,6 +290,14 @@ Is it a hashref?
 
 Is it an arrayref?
 
+=item isa_data_ref
+
+Is it a scalar ref or an object with method C<as_scalarref>?
+
+=item isa_handle
+
+Is it a GLOB ref or IO::Handle?
+
 =item isa_int
 
 Is it an integer?

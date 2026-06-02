@@ -433,6 +433,14 @@ Lowest cluster id which can store data.  Always 2.
 
 Highest cluster id which can store data.  C<< cluster_count + 1 >>.
 
+=attribute root_dir_start_sector
+
+First sector of the Fat12/Fat16 root directory.  (Fat32 stores the root dir in the data area)
+
+=attribute root_dir_offset
+
+The byte offset of the Fat12/Fat16 root directory from start of volume.
+
 =attribute root_dir_sector_count
 
 Total number of sectors required to hold the root directory entries.  0 for FAT32, which stores
@@ -440,7 +448,7 @@ the root dir in the clusters with everything else.
 
 =attribute root_dir_size
 
-C<< root_dir_sector_count * bytes_per_sector >>
+  root_dir_sector_count * bytes_per_sector
 
 =attribute data_start_sector
 
@@ -448,7 +456,9 @@ Sector offset within the volume where the data clusters begin.
 
 =attribute data_start_offset
 
-The byte offset of the start of the data area.  C<< data_start_sector * bytes_per_sector >>.
+The byte offset from the start of the volume to the start of the data area.
+
+  data_start_sector * bytes_per_sector
 
 =attribute data_start_device_offset
 
@@ -457,6 +467,20 @@ The start of the data area as an absolute device address.
 =attribute data_sector_count
 
 Total number of sectors available for data.
+
+=attribute data_limit_sector
+
+Sector number following the final data sector, such that
+
+  data_limit_sector - data_start_sector = data_sector_count
+
+=attribute data_limit_offset
+
+The byte offset from start of the volume to immediately following the data area.
+
+=attribute data_limit_device_offset
+
+The limit of the data area as an absolute device address.
 
 =attribute total_sector_count
 
