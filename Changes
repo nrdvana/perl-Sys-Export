@@ -4,16 +4,15 @@
       - VFAT
       - ISO9660
       - ISO9660Hybrid
-      - GPT
     - Exported function 'which' searches export source tree for executables
+    - LazyFileData object can load or map files on demand.
+    - Exported function 'filedata' creates LazyFileData objects.
     - Exporting perl scripts uses strace (when on Linux) to detect dependencies
     - Sys::Export::LogAny emits to Log::Any if available
-    - LazyFileData object can load or map files on demand.
     - Numerous new utility functions
     - Incomplete experimental x86 boot loader
   - API Changes:
-    - Export %fileinfo hash no longer supports 'data_path' attribute.
-      Replaced by `{ data => $LazyFileData }`.
+    - Export of 'data_path' is deprecated in favor of `{ data => filedata($filename) }`.
   - Bug fixes:
     - Various improvements to basic export workflow and error messages
 
