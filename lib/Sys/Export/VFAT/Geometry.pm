@@ -44,7 +44,7 @@ The math within is derived from the official published formulas in
   Version 1.03, December 6, 2000
   Microsoft Corporation
 
-=head1 FAT STRUCTURE
+=head2 FAT Structure
 
 To understand the attributes of this module, it helps to first understand how FAT is structured.
 
