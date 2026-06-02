@@ -243,6 +243,8 @@ the global exporter object get exported as functions:
 
 =back
 
+along with the exports L</exporter> and L</filedata>.
+
 =cut
 
 sub add           { $exporter->add(@_) }
@@ -454,7 +456,7 @@ sub round_up_to_multiple($n, $pow2) {
   $scalar_ref= map_or_load_file($path, $offset, $length);
 
 If L<File::Map> is available, this creates a read-only memory map of the file (from the
-specified offset) and rreturns a scalar ref to it.  If not, it simply loads the file into
+specified offset) and returns a scalar ref to it.  If not, it simply loads the file into
 a scalar and returns a ref to that.  You should assume the data in the scalar is read-only.
 
 =cut
