@@ -200,4 +200,9 @@ sub data($self, @v) {
    $self->{data}
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::Extent::}{qw(
+   carp croak confess blessed isa_array isa_data_ref isa_export_dst isa_exporter isa_group
+   isa_handle isa_hash isa_int isa_pow2 isa_user isa_userdb round_up_to_multiple
+)};
 1;

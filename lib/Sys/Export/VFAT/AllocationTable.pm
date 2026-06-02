@@ -28,7 +28,7 @@ use warnings;
 use experimental qw( signatures );
 use Scalar::Util 'refaddr';
 use Carp;
-use Sys::Export qw( :isa );
+use Sys::Export qw( isa_int );
 use Sys::Export::VFAT::Geometry qw( FAT12_MAX_CLUSTERS FAT16_MAX_CLUSTERS FAT32_MAX_CLUSTERS );
 
 =attribute fat
@@ -317,4 +317,6 @@ sub pack($self, $bits=undef) {
    }
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::VFAT::AllocationTable::}{qw( carp confess croak refaddr isa_int )};
 1;

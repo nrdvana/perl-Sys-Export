@@ -7,7 +7,6 @@ use v5.26;
 use warnings;
 use experimental qw( signatures );
 use parent 'Sys::Export::VFAT::Directory';
-use Scalar::Util qw( dualvar weaken );
 
 =constructor new
 

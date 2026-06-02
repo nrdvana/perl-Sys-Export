@@ -43,7 +43,7 @@ use v5.26;
 use warnings;
 use experimental qw( signatures );
 use Sys::Export::LogAny '$log';
-use Encode;
+use Encode ();
 use Sys::Export::VFAT;
 use Scalar::Util qw( weaken );
 use List::Util qw( min max );
@@ -245,4 +245,6 @@ sub build_shortnames($self) {
    return $self;
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::VFAT::Directory::}{qw( carp confess croak min max weaken )};
 1;

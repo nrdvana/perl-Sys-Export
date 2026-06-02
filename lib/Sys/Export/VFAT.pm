@@ -10,7 +10,7 @@ use Scalar::Util qw( blessed dualvar refaddr weaken );
 use List::Util qw( min max );
 use POSIX 'ceil';
 use Sys::Export::LogAny '$log';
-use Encode;
+use Encode qw( encode decode );
 use Carp;
 our @CARP_NOT= qw( Sys::Export Sys::Export::Unix );
 use constant {
@@ -27,7 +27,7 @@ use Exporter 'import';
 our @EXPORT_OK= qw( FAT12 FAT16 FAT32 ATTR_READONLY ATTR_HIDDEN ATTR_SYSTEM ATTR_ARCHIVE
   ATTR_VOLUME_ID ATTR_DIRECTORY is_valid_longname is_valid_shortname is_valid_volume_label
   build_shortname );
-use Sys::Export qw( :isa expand_stat_shorthand write_file_extent );
+use Sys::Export qw( isa_hash isa_array isa_handle isa_int isa_pow2 expand_stat_shorthand write_file_extent );
 use Sys::Export::VFAT::Geometry qw( FAT12 FAT16 FAT32 );
 require Sys::Export::VFAT::AllocationTable;
 require Sys::Export::VFAT::File;
@@ -1061,4 +1061,9 @@ sub _pack_directory($self, $dir) {
    $dir->file->{data}= \$data;
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::VFAT::}{qw(
+   carp croak confess encode decode min max ceil blessed dualvar refaddr weaken S_ISDIR S_ISREG
+   expand_stat_shorthand isa_array isa_handle isa_hash isa_int isa_pow2 write_file_extent
+)};
 1;

@@ -8,9 +8,9 @@ use warnings;
 use experimental qw( signatures );
 use Scalar::Util qw( blessed );
 use List::Util qw( min max );
-use Encode;
+use Encode qw( encode );
 use Sys::Export::LogAny '$log';
-use Sys::Export qw( write_file_extent :isa round_up_to_multiple );
+use Sys::Export qw( write_file_extent isa_array isa_pow2 isa_handle round_up_to_multiple );
 use Sys::Export::GPT::Partition;
 use Carp;
 
@@ -472,4 +472,9 @@ sub _pack_header($self, $is_backup, $entries_crc) {
    return $header;
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::GPT::}{qw(
+   carp croak confess blessed min max encode write_file_extent round_up_to_multiple
+   isa_array isa_handle isa_pow2
+)};
 1;

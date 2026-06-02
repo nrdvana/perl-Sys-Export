@@ -90,4 +90,6 @@ sub as_string {
    ${ $_[0][0] // $_[0]->as_scalarref }
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::LazyFileData::}{qw( carp croak confess )};
 1;

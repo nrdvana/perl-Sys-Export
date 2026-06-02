@@ -225,10 +225,5 @@ sub finish($self) {
 }
 
 # Avoiding dependency on namespace::clean
-{  no strict 'refs';
-   delete @{"Sys::Export::CPIO::"}{qw(
-      S_IFDIR S_IFMT blessed carp croak
-   )}
-}
-
+delete @{Sys::Export::CPIO::}{qw( S_IFDIR S_IFMT blessed carp croak confess )};
 1;

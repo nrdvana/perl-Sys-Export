@@ -8,7 +8,6 @@ use warnings;
 use experimental qw( signatures );
 use parent 'Sys::Export::Extent';
 use Sys::Export::ISO9660;
-use Carp;
 our @CARP_NOT= qw( Sys::Export::ISO9660 );
 
 =constructor new

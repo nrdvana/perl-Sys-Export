@@ -7,7 +7,7 @@ use v5.26;
 use warnings;
 use experimental qw( signatures );
 use Carp;
-use Sys::Export qw( :isa write_file_extent expand_stat_shorthand round_up_to_multiple S_ISDIR );
+use Sys::Export qw( isa_hash isa_handle isa_array write_file_extent expand_stat_shorthand round_up_to_multiple S_ISDIR );
 use Sys::Export::LogAny '$log';
 use Sys::Export::GPT;
 use Sys::Export::ISO9660 qw( BOOT_EFI );
@@ -344,4 +344,9 @@ sub finish($self) {
    }
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::ISO9660Hybrid::}{qw(
+   carp croak confess write_file_extent expand_stat_shorthand round_up_to_multiple
+   isa_hash isa_handle isa_array S_ISDIR BOOT_EFI
+)};
 1;

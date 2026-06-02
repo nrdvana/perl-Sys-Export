@@ -191,10 +191,5 @@ sub add_localtime($self, $tz_name) {
 }
 
 # Avoiding dependency on namespace::clean
-{  no strict 'refs';
-   delete @{"Sys::Export::Linux::"}{qw(
-      croak carp
-   )};
-}
-
+delete @{Sys::Export::Linux::}{qw( croak carp confess abs_path )};
 1;

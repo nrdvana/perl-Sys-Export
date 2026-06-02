@@ -11,7 +11,7 @@ use File::Spec::Functions qw( catfile );
 use Storable qw( dclone );
 use Scalar::Util ();
 use User::pwent qw( getpwnam pw_has );
-use Sys::Export qw( :isa );
+use Sys::Export qw( isa_userdb isa_user isa_group );
 
 # making lexical subs allows these to be seen by inner packages as well
 # and removes need for namespace::clean
@@ -1002,11 +1002,5 @@ package Sys::Export::Unix::UserDB::Group {
 }
 
 # Avoiding dependency on namespace::clean
-{  no strict 'refs';
-   delete @{"Sys::Export::Unix::"}{qw(
-      croak carp catfile dclone getpwnam pw_has
-      isa_export_dst isa_exporter isa_group isa_user isa_userdb
-   )};
-}
-
+delete @{Sys::Export::Unix::UserDB::}{qw( dclone isa_userdb isa_user isa_group getpwnam pw_has )};
 1;

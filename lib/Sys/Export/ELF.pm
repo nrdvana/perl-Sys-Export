@@ -242,4 +242,6 @@ sub unpack {
    \%elf;
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::ELF::}{qw( croak carp confess dualvar )};
 1;

@@ -95,4 +95,6 @@ sub device_offset { $_[0]{device_offset} }
 sub cluster   { $_[0]{cluster} }
 sub is_dir    { $_[0]{flags} & Sys::Export::VFAT::ATTR_DIRECTORY() }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::VFAT::File::}{qw( carp confess croak )};
 1;

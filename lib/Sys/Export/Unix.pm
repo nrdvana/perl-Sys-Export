@@ -1499,13 +1499,11 @@ sub _patchelf($self, $path, @args) {
 }
 
 # Avoiding dependency on namespace::clean
-{  no strict 'refs';
-   delete @{"Sys::Export::Unix::"}{qw(
-      croak carp abs_path blessed looks_like_number
-      isa_export_dst isa_exporter isa_group isa_user isa_userdb S_IFMT
-      S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
-      S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT
-   )};
-}
-
+delete @{Sys::Export::Unix::}{qw(
+   croak carp abs_path blessed looks_like_number max isa_hash isa_array isa_data_ref isa_handle
+   isa_int isa_pow2 isa_export_dst isa_exporter isa_group isa_user isa_userdb S_IFMT
+   map_or_load_file
+   S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
+   S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT
+)};
 1;

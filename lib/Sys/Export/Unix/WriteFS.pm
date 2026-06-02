@@ -432,12 +432,9 @@ sub _delayed_apply_stat($self, $abs_path, $stat, @delayed) {
 }
 
 # Avoiding dependency on namespace::clean
-{  no strict 'refs';
-   delete @{"Sys::Export::Unix::"}{qw(
-      croak carp abs_path S_IFMT
-      S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT 
-      S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT
-   )};
-}
-
+delete @{Sys::Export::Unix::WriteFS::}{qw(
+   carp croak abs_path blessed isa_hash
+   S_IFBLK S_IFCHR S_IFDIR S_IFIFO S_IFLNK S_IFMT S_IFREG S_IFSOCK S_IFWHT
+   S_ISBLK S_ISCHR S_ISDIR S_ISFIFO S_ISLNK S_ISREG S_ISSOCK S_ISWHT
+)};
 1;

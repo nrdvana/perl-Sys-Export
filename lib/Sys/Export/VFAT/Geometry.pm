@@ -81,7 +81,7 @@ cluster numbers.
 use v5.26;
 use warnings;
 use experimental qw( signatures );
-use Sys::Export qw( :isa round_up_to_pow2 round_up_to_multiple );
+use Sys::Export qw( isa_hash isa_int isa_pow2 round_up_to_pow2 round_up_to_multiple );
 use Scalar::Util qw( dualvar );
 use POSIX 'ceil';
 use Carp;
@@ -691,11 +691,8 @@ sub unpack {
 }
 
 # Avoiding dependency on namespace::clean
-{  no strict 'refs';
-   delete @{"Sys::Export::VFAT::Geometry::"}{qw(
-      carp confess croak ceil isa_array isa_export_dst isa_group isa_hash isa_exporter isa_int
-      isa_pow2 isa_user isa_userdb round_up_to_multiple round_up_to_pow2
-   )}
-}
-
+delete @{Sys::Export::VFAT::Geometry::}{qw(
+   carp confess croak ceil dualvar
+   isa_hash isa_int isa_pow2 round_up_to_multiple round_up_to_pow2
+)};
 1;

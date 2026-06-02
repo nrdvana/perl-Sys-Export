@@ -57,9 +57,9 @@ use Scalar::Util qw( blessed dualvar refaddr weaken );
 use List::Util qw( min max sum );
 use Time::HiRes 'time';
 use POSIX 'ceil';
-use Sys::Export qw( :isa write_file_extent expand_stat_shorthand );
+use Sys::Export qw( isa_hash isa_handle isa_array write_file_extent expand_stat_shorthand );
 use Sys::Export::LogAny '$log';
-use Encode;
+use Encode qw( encode decode );
 use constant {
    FLAG_HIDDEN      => dualvar(0x01, 'FLAG_HIDDEN'),      # hidden file
    FLAG_DIRECTORY   => dualvar(0x02, 'FLAG_DIRECTORY'),   # directory
@@ -1187,4 +1187,10 @@ sub _pack_boot_catalog_descriptor($self) {
    return _pack_fields(\@boot_catalog_descriptor, \%attrs);
 }
 
+# Avoiding dependency on namespace::clean
+delete @{Sys::Export::ISO9660::}{qw(
+   carp croak confess blessed dualvar refaddr weaken min max sum time ceil encode decode
+   S_IFDIR S_ISDIR S_ISREG SEEK_SET SEEK_END
+   write_file_extent expand_stat_shorthand isa_handle isa_array isa_hash
+)};
 1;
