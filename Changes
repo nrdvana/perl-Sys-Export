@@ -1,3 +1,13 @@
+2026-06-06 - Version 0.005
+  - API Changes:
+    - Unix::WriteFS->on_collision
+      - ignore collisions by an identical dirent automatically,
+        before consulting the on_collision attribute.
+        This makes it much simpler to implement an on_collision callback.
+      - rename the action 'ignore_if_same' to 'croak'
+  - Remove dependency on Log::Any::Adapter::TAP
+  - Documentation tweaks
+
 2026-05-02 - Version 0.004
   - New Features:
     - New export writers for minting disk images:
