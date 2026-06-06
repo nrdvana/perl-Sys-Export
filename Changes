@@ -1,3 +1,13 @@
+  - API Changes:
+    - Unix->src_lib_path / Unix->src_lib_path_list
+      The library path searched for ELF libraries is now configurable
+    - Unix->src_exe_path / Unix->src_exe_path
+      The attribute is now lowercase, but the src_exe_PATH is aliased for
+      back-compat.
+    - Linux->parse_ld_so_conf
+      This parses library paths from the GNU /etc/ld.so.conf file
+      This is also used as the default for src_lib_path.
+
 2026-06-06 - Version 0.005
   - API Changes:
     - Unix::WriteFS->on_collision

@@ -27,6 +27,8 @@ use experimental qw( signatures );
 use parent 'Sys::Export::Unix';
 use Cwd 'abs_path';
 use Carp;
+use Sys::Export 'filedata';
+use Sys::Export::LogAny '$log';
 
 sub _build__trace_deps {
    my $self= shift;
@@ -100,6 +102,42 @@ sub _trace_deps_linux_strace($self, @argv) {
          if $wstat;
       return \%deps;
    }
+}
+
+=method parse_ld_so_conf
+
+  @libs= $exporter->parse_ld_so_conf($filename = 'etc/ld.so.conf');
+
+Return a list of library paths parsed from a ld.so.conf file.
+
+=cut
+
+sub parse_ld_so_conf($self, $conf_path= 'etc/ld.so.conf') {
+   my $data= filedata($self->src_abs . $conf_path);
+   my @libs;
+   for (split /\n/, $$data) {
+      chomp;
+      next if /^\s*#/;
+      if (/^\s*include (\S+)/) {
+         my $pattern= $1;
+         my $prefix= $pattern =~ s{^/}{}? '' : ($conf_path =~ s{[^/]+\z}{}r);
+         for (glob $self->src_abs . $prefix . $pattern) {
+            push @libs, $self->parse_ld_so_conf(substr($_, length $self->src_abs));
+         }
+      }
+      elsif (m{^/}) {
+         push @libs, substr($_, 1);
+      }
+      else {
+         $log->warn("parse_ld_so_conf: unknown syntax at '$_'");
+      }
+   }
+   return @libs;
+}
+
+sub _build_src_lib_path($self) {
+   my @libs= eval { $self->parse_ld_so_conf };
+   return @libs? \@libs : $self->next::method();
 }
 
 =method add_passwd
@@ -191,5 +229,5 @@ sub add_localtime($self, $tz_name) {
 }
 
 # Avoiding dependency on namespace::clean
-delete @{Sys::Export::Linux::}{qw( croak carp confess abs_path )};
+delete @{Sys::Export::Linux::}{qw( croak carp confess abs_path filedata )};
 1;

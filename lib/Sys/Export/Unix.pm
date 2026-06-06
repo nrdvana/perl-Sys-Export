@@ -160,13 +160,13 @@ sub new {
       }
    }
 
-   $attrs{src_exe_PATH} //= "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+   $attrs{src_exe_path} //= "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                           . ($abs_src eq '/'? ":$ENV{PATH}" : '');
 
    my $self= bless \%attrs, $class;
 
    # Run the accessor logic to initialize the parameter
-   for my $method (qw( src_exe_PATH log )) {
+   for my $method (qw( src_exe_path log )) {
       $self->$method(delete $self->{$method})
    }
    # Special cases - call the method once for each key/value pair
@@ -188,7 +188,7 @@ paths inside this filesystem, or things will break.
 
 The C<abs_path> of the root of the source filesystem, always ending with '/'.
 
-=attribute src_exe_PATH
+=attribute src_exe_path
 
 A string like the Unix PATH environment variable which lists the directories to search for
 executables.  Each directory path is relative to the C<src> dir.
@@ -204,9 +204,21 @@ When you set a new value (or the initial value from the constructor) for this va
 performs sanitization and deduplication of the paths.   The actual value is stored in list form
 at L</src_exe_PATH_list>, but reading this attribute re-joins them with colons.
 
-=attribute src_exe_PATH_list
+=attribute src_exe_path_list
 
 Same logical value as C<src_exe_PATH>, but returns a list of paths relative to C<src>, useful
+for iteration.
+
+=attribute src_lib_path
+
+A string like the Unix LD_LIBRARY_PATH environment variable which lists the directories to
+search for ELF libraries.  Each directory path is relative to the C<src> dir.  The default is
+
+  "lib:lib64:usr/lib:usr/lib64"
+
+=attribute src_lib_path_list
+
+Same logical value as C<src_lib_path>, but returns a list of paths relative to C<src>, useful
 for iteration.
 
 =attribute src_userdb
@@ -286,26 +298,62 @@ sub log {
    $_[0]{log};
 }
 
-sub src_exe_PATH($self, @value) {
-   $self->src_exe_PATH_list(map split(/:/, $_, -1), @value) if @value;
-   return join ':', map "/$_", $self->src_exe_PATH_list;
+sub src_exe_path($self, @value) {
+   $self->src_exe_path_list(map split(/:/, $_, -1), @value) if @value;
+   return join ':', map "/$_", $self->src_exe_path_list;
 }
 
-sub src_exe_PATH_list($self, @value) {
+sub src_exe_path_list($self, @value) {
    if (@value) {
       for (grep length, @value) {
-         $_= $self->_src_abs_path($_); # resolve symlinks
-         $_= undef unless length && -d $self->src_abs . $_;
+         my $abs= $self->_src_abs_path($_); # resolve symlinks
+         if (length $abs && -d $self->src_abs . $abs) {
+            $_= $abs;
+         } else {
+            warn "No such directory $_";
+            $_= undef;
+         } 
       }
       my %seen;
-      $self->{src_exe_PATH_list}= [ grep length && !$seen{$_}++, @value ];
+      $self->{src_exe_path}= [ grep length && !$seen{$_}++, @value ];
    }
-   return @{ $self->{src_exe_PATH_list} // [] };
+   return @{ $self->{src_exe_path} // [] };
+}
+# back-compat
+*src_exe_PATH= *src_exe_path;
+*src_exe_PATH_list= *src_exe_path_list;
+
+sub src_lib_path($self, @value) {
+   $self->src_lib_path_list(map split(/:/, $_, -1), @value) if @value;
+   return join ':', map "/$_", $self->src_lib_path_list;
+}
+
+sub src_lib_path_list($self, @value) {
+   if (@value) {
+      for (grep length, @value) {
+         my $abs= $self->_src_abs_path($_); # resolve symlinks
+         if (length $abs && -d $self->src_abs . $abs) {
+            $_= $abs;
+         } else {
+            warn "No such directory $_";
+            $_= undef;
+         } 
+      }
+      my %seen;
+      $self->{src_lib_path}= [ grep length && !$seen{$_}++, @value ];
+   }
+   return @{ $self->{src_lib_path} //= $self->_build_src_lib_path };
+}
+
+sub _build_src_lib_path($self) {
+   return [ grep -d $self->src_abs . $_,
+      'usr/local/lib64', 'usr/local/lib', 'usr/lib64', 'usr/lib', 'lib64', 'lib'
+   ];
 }
 
 #=attribute _can_run_in_src
 #
-#This is a boolean that indicates whether executable in the source directory can be executed
+#This is a boolean that indicates whether executables in the source directory can be executed
 #on this host.  This is always true if "src" is '/', since perl wouldn't be able to run in this
 #environment to run Sys::Export if that weren't true.  If src is any other path, this module
 #needs 'chroot' permission, and tests using C<< chroot $srcdir /bin/sh -c 'exit 0' >>.
@@ -1124,7 +1172,7 @@ sub process_file($self, $file, $notes) {
 }
 
 sub _resolve_src_library($self, $libname, $rpath) {
-   my @paths= ((grep length, split /:/, ($rpath//'')), qw( lib lib64 usr/lib usr/lib64 ));
+   my @paths= ((grep length, split /:/, ($rpath//'')), $self->src_lib_path_list);
    for my $path (@paths) {
       $path =~ s,^/,,; # remove leading slash because src_abs ends with slash
       $path =~ s,(?<=[^/])\z,/, if length $path; # add trailing slash if it isn't the root
