@@ -117,7 +117,7 @@ sub parse_ld_so_conf($self, $conf_path= 'etc/ld.so.conf') {
    my @libs;
    for (split /\n/, $$data) {
       chomp;
-      next if /^\s*#/;
+      next if /^\s*(#|\z)/;
       if (/^\s*include (\S+)/) {
          my $pattern= $1;
          my $prefix= $pattern =~ s{^/}{}? '' : ($conf_path =~ s{[^/]+\z}{}r);
