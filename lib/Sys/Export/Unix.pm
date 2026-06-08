@@ -1213,35 +1213,39 @@ sub process_elf_file($self, $file, $notes) {
          $self->add($interpreter);
       }
       $self->log->debugf("  interpreter = %s, libs = %s", $interpreter, \@libs);
-   }
-   # Is any path rewriting requested?
-   if ($self->_has_rewrites && length $file->{src_path} && defined $interpreter) {
-      # If any dep gets its path rewritten, need to modify interpreter and/or rpath
-      my $rre= $self->path_rewrite_regex;
-      if (grep m/^$rre/, $interpreter, @libs) {
-         # the interpreter and rpath need to be absolute URLs, but within the logical root
-         # of 'dst'.  They're already relative to 'dst', so just prefix a slash.
-         $interpreter= '/'.$self->get_dst_for_src($interpreter);
-         my %rpath;
-         for (@libs) {
-            my $dst_lib= $self->get_dst_for_src($_);
-            $dst_lib =~ s,[^/]+$,,; # path of lib
-            $rpath{$dst_lib}= 1;
+      # Is any path rewriting requested?
+      if ($self->_has_rewrites && (defined $interpreter || @libs)) {
+         # If any dep gets its path rewritten, need to modify interpreter and/or rpath
+         my $rre= $self->path_rewrite_regex;
+         my @patchelf;
+         if (defined $interpreter && $interpreter =~ m/^$rre/) {
+            # the interpreter and rpath need to be absolute URLs, but within the logical root
+            # of 'dst'.  They're already relative to 'dst', so just prefix a slash.
+            push @patchelf, '--set-interpreter' => '/'.$self->get_dst_for_src($interpreter);
          }
-         my $rpath= join ':', map "/$_", keys %rpath;
-         $self->log->debugf("  rewritten interpreter = %s, rpath = %s", $interpreter, $rpath);
-
-         # Create a temporary file so we can run patchelf on it
-         my $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
-         _syswrite_all($tmp, $file->{data});
-         $tmp->close;
-         my @patchelf= ( '--set-interpreter' => $interpreter );
-         push @patchelf, ( '--set-rpath' => $rpath ) if length $rpath;
-         $self->_patchelf($tmp, @patchelf);
-         $file->{data}= map_or_load_file("$tmp");
-         push @$notes, '+patchelf';
-      } else {
-         $self->log->debug("  no interpreter/lib paths affected by rewrites");
+         if (grep m/^$rre/, @libs) {
+            my %rpath;
+            for (@libs) {
+               my $dst_lib= $self->get_dst_for_src($_);
+               $dst_lib =~ s,[^/]+$,,; # path of lib
+               $rpath{$dst_lib}= 1;
+            }
+            if (keys %rpath) {
+               push @patchelf, '--set-rpath' => join(':', map "/$_", keys %rpath);
+            }
+         }
+         if (@patchelf) {
+            $self->log->debug(join ' ', "  patchelf rewrites: ", @patchelf);
+            # Create a temporary file so we can run patchelf on it
+            my $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
+            _syswrite_all($tmp, $file->{data});
+            $tmp->close;
+            $self->_patchelf($tmp, @patchelf);
+            $file->{data}= map_or_load_file("$tmp");
+            push @$notes, '+patchelf';
+         } else {
+            $self->log->debug("  no interpreter/lib paths affected by rewrites");
+         }
       }
    }
 }
