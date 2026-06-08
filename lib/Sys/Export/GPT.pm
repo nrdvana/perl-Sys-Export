@@ -3,7 +3,7 @@ package Sys::Export::GPT;
 # VERSION
 # ABSTRACT: Implementation of GUID Partition Table
 
-use v5.26;
+use v5.28;
 use warnings;
 use experimental qw( signatures );
 use Scalar::Util qw( blessed );

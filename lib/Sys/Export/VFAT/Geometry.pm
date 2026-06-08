@@ -78,7 +78,7 @@ cluster numbers.
 
 =cut
 
-use v5.26;
+use v5.28;
 use warnings;
 use experimental qw( signatures );
 use Sys::Export qw( isa_hash isa_int isa_pow2 round_up_to_pow2 round_up_to_multiple );
