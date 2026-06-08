@@ -15,7 +15,7 @@ BEGIN {
 
 our @EXPORT= (
    @Test2::V0::EXPORT,
-   qw( explain unindent mkfile slurp escape_nonprintable hexdump )
+   qw( explain mkfile slurp escape_nonprintable hexdump )
 );
 
 # Test2 runs async by default, which messes up the relation between warnings and the test
@@ -32,14 +32,6 @@ eval q{
    sub explain { Data::Dumper->new(\@_)->Terse(1)->Indent(1)->Sortkeys(1)->Dump }
    1
 } or die $@;
-
-# Perl didn't get <<~'x' until 5.28, so this lets you write an indented here-block and
-# then remove the common indent from all lines.
-sub unindent {
-   my ($indent)= ($_[0] =~ /^(\s+)/);
-   (my $x= $_[0]) =~ s/^$indent//mg;
-   $x;
-}
 
 # Convert data strings to and from C / Perl backslash notation.
 # Not exhaustive, just hit the most common cases and hex-escape the rest.
