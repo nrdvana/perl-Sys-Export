@@ -22,7 +22,7 @@ our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
    isa_handle isa_pow2 isa_data_ref round_up_to_pow2 round_up_to_multiple map_or_load_file filedata
    add skip find which finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
-   write_file_extent
+   write_file_extent pack unpack
    S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
    S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
 );
@@ -566,5 +566,66 @@ sub write_file_extent($fh, $addr, $size, $data_ref, $ofs=0, $descrip=undef) {
    return 1;
 }
 
+if (eval { pack('Q<', 1) }) {
+   *pack= \*CORE::pack;
+   *unpack= \*CORE::unpack;
+} else {
+   eval <<'END';
+   # On perl without 64-bit support, replace all 'Q' with 32-bit operations
+   # This does not handle full pack syntax, just what is used in this module collection.
+   sub _pack {
+      my $fmt= shift;
+      my $new_fmt= '';
+      my @new_args;
+      require Math::BigInt;
+      my $mask32= Math::BigInt->new('4294967295');
+      for (split / +/, $fmt) {
+         if ($_ eq 'Q>') {
+            # Convert a 64-bit integer into two 32-bit big-endian arguments
+            $new_fmt .= 'NN';
+            my $qw= Math::BigInt->new(shift);
+            push @new_args, ($qw >> 32)->numify(), ($qw & $mask32)->numify();
+         } elsif ($_ eq 'Q<') {
+            # Convert 64-bit integer into two 32-bit little-endian arguments
+            $new_fmt .= 'VV';
+            my $qw= Math::BigInt->new(shift);
+            push @new_args, ($qw & $mask32)->numify(), ($qw >> 32)->numify();
+         } else {
+            $new_fmt .= $_;
+            push @new_args, shift;
+         }
+      }
+      return pack $new_fmt, @new_args;
+   }
+   # This does not handle full unpack syntax, just what is used in this module collection.
+   sub _unpack {
+      my $fmt= shift;
+      my $new_fmt= '';
+      my @replacements;
+      require Math::BigInt;
+      my @fields= split / +/, $fmt;
+      for (reverse 0 .. $#fields) {
+         if ($fields[$_] eq 'Q>') {
+            $new_fmt .= 'a8';
+            push @replacements, [ $_, sub {
+               my ($h,$l)= unpack('NN', $_[0]);
+               (Math::BigInt->new($h) << 32) | $l
+            }];
+         } elsif ($fields[$_] eq 'Q<') {
+            $new_fmt .= 'a8';
+            push @replacements, [ $_, sub {
+               my ($l, $h)= unpack('VV', $_[0]);
+               (Math::BigInt->new($h) << 32) | $l
+            }];
+         }
+      }
+      my @vals= unpack $new_fmt;
+      for (@replacements) {
+         $vals[$_->[0]]= $_->[1]->($vals[$_->[0]]);
+      }
+      return @vals;
+   }
+END
+}
 
 1;

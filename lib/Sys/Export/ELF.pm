@@ -19,6 +19,7 @@ use warnings;
 use experimental qw( signatures );
 use Carp;
 use Scalar::Util 'dualvar';
+use Sys::Export ();
 
 sub _make_enum {
    my $i= 0;
@@ -131,14 +132,14 @@ sub unpack {
    my %elf;
 
    # Start with the encoding-independent fields
-   @elf{@elf_common_header_fields}= unpack($elf_common_header_packstr, $_[0]);
+   @elf{@elf_common_header_fields}= Sys::Export::unpack($elf_common_header_packstr, $_[0]);
    $elf{magic} eq "\x7FELF" or return undef;
    die "Unsupported 'class'" unless 1 <= $elf{class} && $elf{class} <= 2;
    die "Unsupported 'data'" unless 1 <= $elf{data} && $elf{data} <= 2;
    my $encoding_idx= ($elf{class}-1)*2 + ($elf{data}-1);
 
    # Now decode the endian and bit-length-varying fields
-   (undef, @elf{@elf_header_fields})= unpack $elf_header_packstr[$encoding_idx], $_[0];
+   (undef, @elf{@elf_header_fields})= Sys::Export::unpack $elf_header_packstr[$encoding_idx], $_[0];
    my $lim= length $_[0];
    
    # parse segments
@@ -157,7 +158,7 @@ sub unpack {
          my $ofs= $elf{segment_table_ofs} + $i * $elem_len;
          my %segment;
          @segment{@{$segment_header_fields[$encoding_idx]}}
-            = unpack $segment_header_packstr[$encoding_idx],
+            = Sys::Export::unpack $segment_header_packstr[$encoding_idx],
                   substr($_[0], $ofs, $elem_len);
          $segment{type}= $segment_header_type[$segment{type}]
             if $segment{type} > 0 && $segment{type} < @segment_header_type;
@@ -181,7 +182,7 @@ sub unpack {
          my $ofs= $elf{section_table_ofs} + $i * $elem_len;
          my %section;
          @section{@section_header_fields}
-            = unpack $section_header_packstr[$encoding_idx],
+            = Sys::Export::unpack $section_header_packstr[$encoding_idx],
                   substr($_[0], $ofs, $elem_len);
          push @sections, \%section;
       }
@@ -197,7 +198,7 @@ sub unpack {
          for (my $ofs= 0; $ofs < $seg->{filesize}; $ofs += $dynamic_link_entry_len[$encoding_idx]) {
             my %dynamic;
             @dynamic{@dynamic_link_entry_fields}
-               = unpack $dynamic_link_entry_packstr[$encoding_idx],
+               = Sys::Export::unpack $dynamic_link_entry_packstr[$encoding_idx],
                   substr($_[0], $seg->{offset}+$ofs, $dynamic_link_entry_len[$encoding_idx]);
             $dynamic{tag}= $dynamic_link_entry_tag[$dynamic{tag}]
                if $dynamic{tag} > 0 && $dynamic{tag} < @dynamic_link_entry_tag;
