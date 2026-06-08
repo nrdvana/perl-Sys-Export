@@ -33,6 +33,8 @@ use Sys::Export::LogAny '$log';
 sub _build__trace_deps {
    my $self= shift;
    if ($self->_can_run_in_src) {
+      # Seems Solaris has an 'strace' but it isn't compatible enough to pass tests.
+      $^O eq 'linux' or croak "Only Linux strace is supported";
       # Are we going to attempt chrooting?
       if ($self->src_abs ne '/') {
          $self->{cmd_path_chroot} //= do {
