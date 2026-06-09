@@ -22,7 +22,7 @@ our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int
    isa_handle isa_pow2 isa_data_ref round_up_to_pow2 round_up_to_multiple map_or_load_file filedata
    add skip find which finish rewrite_path rewrite_user rewrite_group expand_stat_shorthand
-   write_file_extent pack unpack
+   write_file_extent _pack _unpack
    S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
    S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT
 );
@@ -567,8 +567,8 @@ sub write_file_extent($fh, $addr, $size, $data_ref, $ofs=0, $descrip=undef) {
 }
 
 if (eval { pack('Q<', 1) }) {
-   *pack= \*CORE::pack;
-   *unpack= \*CORE::unpack;
+   *_pack= \*CORE::pack;
+   *_unpack= \*CORE::unpack;
 } else {
    eval <<'END';
    # On perl without 64-bit support, replace all 'Q' with 32-bit operations
