@@ -122,10 +122,10 @@ sub parse_ld_so_conf($self, $conf_path= 'etc/ld.so.conf') {
       next if /^\s*(#|\z)/;
       if (/^\s*include (\S+)/) {
          my $pattern= $1;
+         # relative paths are relative to the config file's parent directory
          my $prefix= $pattern =~ s{^/}{}? '' : ($conf_path =~ s{[^/]+\z}{}r);
-         for (glob $self->src_abs . $prefix . $pattern) {
-            push @libs, $self->parse_ld_so_conf(substr($_, length $self->src_abs));
-         }
+         push @libs, $self->parse_ld_so_conf($_)
+            for $self->src_glob($prefix.$pattern);
       }
       elsif (m{^/}) {
          push @libs, substr($_, 1);
