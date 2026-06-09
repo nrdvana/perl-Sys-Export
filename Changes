@@ -1,12 +1,15 @@
-  - API Changes:
+  - New Features:
     - Unix->src_lib_path / Unix->src_lib_path_list
       The library path searched for ELF libraries is now configurable
-    - Unix->src_exe_path / Unix->src_exe_path
-      The attribute is now lowercase, but the src_exe_PATH is aliased for
-      back-compat.
+    - Unix->src_glob
+      Convenience method for running shell wildcards on the src tree
     - Linux->parse_ld_so_conf
       This parses library paths from the GNU /etc/ld.so.conf file
       These are also added to the default for src_lib_path.
+  - API Changes:
+    - Unix->src_exe_path / Unix->src_exe_path
+      The attribute is now lowercase, but the src_exe_PATH is aliased for
+      back-compat.
   - Bug fixes:
       Support pack(Q) and unpack(Q) on 32-bit perls
 

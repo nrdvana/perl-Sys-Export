@@ -903,6 +903,27 @@ sub add {
    $self;
 }
 
+=method src_glob
+
+This is a helper to build a list of source files using shell wildcard "glob" notation.
+This accepts patterns relative to L</src_abs> and returns filenames relative to L</src_abs>.
+
+  my @files= $exporter->src_glob("foo/bar/*/baz", ...);
+
+It uses perl's own C<glob> function.
+
+=cut
+
+sub src_glob($self, @patterns) {
+   my $src_abs= $self->src_abs;
+   # remove leading '/' from patterns
+   s{^/}{} for @patterns;
+   my @ret;
+   push @ret, map substr($_, length $src_abs), glob "$src_abs$_"
+      for @patterns;
+   return @ret;
+}
+
 =method src_find
 
 This is a helper function to build lists of source files.  It iterates the L</src> tree from
