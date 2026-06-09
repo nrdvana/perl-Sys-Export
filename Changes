@@ -11,7 +11,9 @@
       The attribute is now lowercase, but the src_exe_PATH is aliased for
       back-compat.
   - Bug fixes:
-      Support pack(Q) and unpack(Q) on 32-bit perls
+    - Support pack(Q) and unpack(Q) on 32-bit perls
+    - Prevent attempting Linux strace on non-Linux OS
+  - Require perl 5.28, for list-context state variables
 
 2026-06-06 - Version 0.005
   - API Changes:
