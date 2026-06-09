@@ -6,7 +6,7 @@
       back-compat.
     - Linux->parse_ld_so_conf
       This parses library paths from the GNU /etc/ld.so.conf file
-      This is also used as the default for src_lib_path.
+      These are also added to the default for src_lib_path.
   - Bug fixes:
       Support pack(Q) and unpack(Q) on 32-bit perls
 

@@ -108,7 +108,7 @@ sub _trace_deps_linux_strace($self, @argv) {
 
 =method parse_ld_so_conf
 
-  @libs= $exporter->parse_ld_so_conf($filename = 'etc/ld.so.conf');
+  @lib_paths= $exporter->parse_ld_so_conf($filename = 'etc/ld.so.conf');
 
 Return a list of library paths parsed from a ld.so.conf file.
 
@@ -138,8 +138,89 @@ sub parse_ld_so_conf($self, $conf_path= 'etc/ld.so.conf') {
 }
 
 sub _build_src_lib_path($self) {
-   my @libs= eval { $self->parse_ld_so_conf };
-   return @libs? \@libs : $self->next::method();
+   my $paths= $self->next::method();
+   # ld.so.conf may or may not be used on this host
+   if (defined $self->_src_abs_path('etc/ld.so.conf')) {
+      eval { $paths= $self->_distinct_abs_directories(1, @$paths, $self->parse_ld_so_conf) }
+         or $self->log->warn("Failed to parse ld.so.conf: $@");
+   }
+   return $paths;
+}
+
+=method parse_nsswitch_conf
+
+  %db_info= $exporter->parse_nsswitch_conf($filename => 'etc/nsswitch.conf');
+  # (
+  #    aliases => [ @module_names ],
+  #    hosts   => [ @module_names ],
+  #    ...
+  # )
+
+The GNU Libc "nsswitch" system lets you dynamically plug libraries to support various libc
+database lookups.  In the hashref data returned by this function, the key is the name of the
+database, like C<'hosts'> or C<'passwd'>, and the value is an arrayref of which plugins will be
+consulted, and in what order they will be queried.
+
+=cut
+
+sub parse_nsswitch_conf($self, $conf_path= 'etc/nsswitch.conf') {
+   my $data= filedata($self->src_abs . $conf_path);
+   my @db_conf;
+   for (split /\n/, $$data) {
+      chomp;
+      next if /^\s*(#|\z)/;
+      if (m{^\s*([^\s:]+)\s*:\s*(\S.+)}) {
+         push @db_conf, $1 => [ split /\s+/, $2 ];
+      }
+      else {
+         $log->warn("parse_nsswitch_conf: unknown syntax at '$_'");
+      }
+   }
+   return @db_conf;
+}
+
+=method add_nsswitch_libs
+
+  $exporter->add_nsswitch_libs;
+  $exporter->add_nsswitch_libs(@module_names);
+
+With glibc, the binaries do not directly refer to the dynamically-configured nsswitch modules,
+so the modules won't get automatically included.  If you want your chroot image to be able to
+do things like DNS name lookups or passwd file lookups, you need to include any NSS module
+configured for them.
+
+This method defaults to the set of all modules returned by L</parse_nsswitch_conf>, and then
+adds libraries for each of them, like C<"lib64/libnss_dns.so.2">.  Missing libraries generate a
+warning (not an exception).
+
+With newer glibc, the modules 'files' and 'dns' are built-in, to aid with chroots, though the
+libnss_files.so and libnss_dns.so still exist in the lib directory.
+This method doesn't attempt to add a special case for omitting them.
+
+=cut
+
+sub add_nsswitch_libs($self, @module_names) {
+   if (!@module_names) {
+      my %seen;
+      for ($self->parse_nsswitch_conf) {
+         next unless ref eq 'ARRAY';
+         ++$seen{$_} for @$_;
+      }
+      @module_names= sort keys %seen;
+   }
+   my $abs= $self->src_abs;
+   my @libpath= $self->src_lib_path_list;
+   ns_module: for (@module_names) {
+      my $pattern= 'libnss_'.$_.'.*';
+      for my $libdir (@libpath) {
+         $log->tracef("Look for %s in %s", $pattern, $libdir);
+         if (my @match= glob $abs . $pattern) {
+            $self->add(map substr($_, length $abs), @match);
+            next ns_module;
+         }
+      }
+      $log->warn("glibc nss module not found: $_");
+   }
 }
 
 =method add_passwd
