@@ -117,9 +117,12 @@ sub new {
       : croak "Expected hashref or even-length list";
 
    defined $attrs{src} or croak "Require 'src' attribute";
-   my $abs_src= abs_path($attrs{src} =~ s,(?<=[^/])$,/,r)
+   # must end with trailing '/'
+   $attrs{src} .= '/' unless $attrs{src} =~ m{/\z};
+   my $src_abs= abs_path($attrs{src})
       or croak "src directory '$attrs{src}' does not exist";
-   $attrs{src_abs}= $abs_src eq '/'? $abs_src : "$abs_src/";
+   $src_abs .= '/' unless $src_abs =~ m{/\z};
+   $attrs{src_abs}= $src_abs;
 
    defined $attrs{dst} or croak "Require 'dst' attribute";
    if (isa_export_dst $attrs{dst}) {
@@ -160,14 +163,11 @@ sub new {
       }
    }
 
-   $attrs{src_exe_path} //= "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                          . ($abs_src eq '/'? ":$ENV{PATH}" : '');
-
    my $self= bless \%attrs, $class;
 
-   # Run the accessor logic to initialize the parameter
-   for my $method (qw( src_exe_path log )) {
-      $self->$method(delete $self->{$method})
+   # Run the accessor logic to coerce the parameter properly
+   for my $method (qw( src_exe_path src_lib_path log )) {
+      $self->$method(delete $self->{$method}) if exists $self->{$method};
    }
    # Special cases - call the method once for each key/value pair
    for my $method (qw( rewrite_path rewrite_user rewrite_group )) {
@@ -298,57 +298,65 @@ sub log {
    $_[0]{log};
 }
 
+sub _distinct_abs_directories($self, $warn, @list) {
+   for (@list) {
+      my $abs= $self->_src_abs_path($_); # resolve symlinks
+      if (defined $abs && -d $self->src_abs . $abs) {
+         $_= $abs;
+      } else {
+         $self->log->warn("No such directory $_") if $warn;
+         $_= undef;
+      }
+   }
+   my %seen;
+   return [ grep defined && !$seen{$_}++, @list ]
+}
+
 sub src_exe_path($self, @value) {
-   $self->src_exe_path_list(map split(/:/, $_, -1), @value) if @value;
+   $self->src_exe_path_list(
+      ref $value[0] eq 'ARRAY'? @{ $value[0] }
+      : map split(/:/, $_, -1), @value
+   ) if @value;
    return join ':', map "/$_", $self->src_exe_path_list;
 }
 
 sub src_exe_path_list($self, @value) {
    if (@value) {
-      for (grep length, @value) {
-         my $abs= $self->_src_abs_path($_); # resolve symlinks
-         if (length $abs && -d $self->src_abs . $abs) {
-            $_= $abs;
-         } else {
-            warn "No such directory $_";
-            $_= undef;
-         } 
-      }
-      my %seen;
-      $self->{src_exe_path}= [ grep length && !$seen{$_}++, @value ];
+      $self->{src_exe_path}= $self->_distinct_abs_directories(1, @value);
    }
-   return @{ $self->{src_exe_path} // [] };
+   return @{ $self->{src_exe_path} //= $self->_build_src_exe_path };
 }
+
+sub _build_src_exe_path($self) {
+   my @exe_path= qw( usr/local/sbin usr/local/bin usr/sbin usr/bin sbin bin );
+   push @exe_path, grep s{^/}{}, split /:/, $ENV{PATH}
+      if $self->src_abs eq '/';
+   return $self->_distinct_abs_directories(0, @exe_path);
+}
+
 # back-compat
 *src_exe_PATH= *src_exe_path;
 *src_exe_PATH_list= *src_exe_path_list;
 
 sub src_lib_path($self, @value) {
-   $self->src_lib_path_list(map split(/:/, $_, -1), @value) if @value;
+   $self->src_lib_path_list(
+      ref $value[0] eq 'ARRAY'? @{ $value[0] }
+      : map split(/:/, $_, -1), @value
+   ) if @value;
    return join ':', map "/$_", $self->src_lib_path_list;
 }
 
 sub src_lib_path_list($self, @value) {
    if (@value) {
-      for (grep length, @value) {
-         my $abs= $self->_src_abs_path($_); # resolve symlinks
-         if (length $abs && -d $self->src_abs . $abs) {
-            $_= $abs;
-         } else {
-            warn "No such directory $_";
-            $_= undef;
-         } 
-      }
-      my %seen;
-      $self->{src_lib_path}= [ grep length && !$seen{$_}++, @value ];
+      $self->{src_lib_path}= $self->_distinct_abs_directories(1, @value);
    }
    return @{ $self->{src_lib_path} //= $self->_build_src_lib_path };
 }
 
 sub _build_src_lib_path($self) {
-   return [ grep -d $self->src_abs . $_,
-      'usr/local/lib64', 'usr/local/lib', 'usr/lib64', 'usr/lib', 'lib64', 'lib'
-   ];
+   return $self->_distinct_abs_directories(0,
+      qw( usr/local/lib64 usr/local/lib usr/lib64 usr/lib lib64 lib )
+   );
 }
 
 #=attribute _can_run_in_src
@@ -548,6 +556,10 @@ sub _chroot_abs_path($self, $root, $path) {
 sub _src_abs_path($self, $path) {
    $self->_chroot_abs_path($self->{src_abs}, $path);
 }
+
+# Like src_abs_path, this performs a logical abs_path on all path components *except* the final
+# one, so the parent directories will be resolved to an absolute path, but the leaf directory
+# entry is not resolved and doesn't even need to exist.
 sub _src_parent_abs_path($self, $path) {
    # Determine the final path component, ignoring '.'
    my @path= grep length && $_ ne '.', split '/', $path;
