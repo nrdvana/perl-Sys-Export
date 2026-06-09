@@ -8,6 +8,12 @@ use Cwd 'abs_path';
 use Fcntl 'S_IFREG';
 use Sys::Export::Linux;
 
+=head1 gnu-libc
+
+Test the special features of the ::Linux exporter related to aspects of GNU libc.
+
+=cut
+
 package Sys::Export::MockDst {
    sub new($class)        { bless { files => {} }, $class }
    sub files($self)       { $self->{files} }
@@ -15,8 +21,13 @@ package Sys::Export::MockDst {
    sub finish($self)      {}
 }
 
-my $tmp= File::Temp->newdir;
-my $dst= Sys::Export::MockDst->new();
+=head2 ld_so_conf
+
+Test the ability to parse /etc/ld.so.conf and then add those library paths to the exporter's
+src_lib_path.  I rounded up several real example filesystems with varying ld.so.conf, though
+there are probably still more edge cases that exist out there.
+
+=cut
 
 subtest ld_so_conf => sub {
    subtest newer_arch => sub {
@@ -49,7 +60,7 @@ subtest ld_so_conf => sub {
       mkdir "$tmp/usr/lib/perf";
       mkdir "$tmp/usr/lib/libfakeroot";
 
-      my $exporter= Sys::Export::Linux->new(src => "$tmp", dst => $dst);
+      my $exporter= Sys::Export::Linux->new(src => "$tmp", dst => Sys::Export::MockDst->new());
       is { map +($_ => 1), $exporter->parse_ld_so_conf },
          { 'usr/lib/perf' => 1, 'opt/android-sdk/tools/lib' => 1, 'usr/lib/libfakeroot' => 1 },
          'parse_ld_so_conf';
@@ -62,7 +73,7 @@ subtest ld_so_conf => sub {
          'src_lib_path_list';
    };
 
-   subtest newer_gentoo => sub {
+   subtest gentoo2026 => sub {
       my $tmp= File::Temp->newdir;
       mkdir "$tmp/etc";
       mkfile "$tmp/etc/ld.so.conf", <<~END;
@@ -84,7 +95,7 @@ subtest ld_so_conf => sub {
       mkdir "$tmp/usr/lib/gcc/x86_64-pc-linux-gnu";
       mkdir "$tmp/usr/lib/gcc/x86_64-pc-linux-gnu/15";
 
-      my $exporter= Sys::Export::Linux->new(src => "$tmp", dst => $dst);
+      my $exporter= Sys::Export::Linux->new(src => "$tmp", dst => Sys::Export::MockDst->new());
       is { map +($_ => 1), $exporter->parse_ld_so_conf },
          { 'usr/lib/gcc/x86_64-pc-linux-gnu/15' => 1,
            'usr/lib64' => 1,
@@ -124,7 +135,7 @@ subtest ld_so_conf => sub {
       mkdir "$tmp/usr/lib";
       mkdir "$tmp/usr/lib/libstdc++-v3";
 
-      my $exporter= Sys::Export::Linux->new(src => "$tmp", dst => $dst);
+      my $exporter= Sys::Export::Linux->new(src => "$tmp", dst => Sys::Export::MockDst->new());
       is { map +($_ => 1), $exporter->parse_ld_so_conf },
          { 'usr/local/lib' => 1,
            'usr/lib/gcc/i386-pc-linux-gnu/4.2.4' => 1,
@@ -142,6 +153,83 @@ subtest ld_so_conf => sub {
             'usr/lib/libstdc++-v3' => 1,
          },
          'src_lib_path_list';
+   };
+};
+
+=head2 nsswitch
+
+Test the ability to parse /etc/nsswitch.conf and then add the related library files.
+This is not performed automatically in case the user wants to exclude some of them from the
+built image.
+
+A future version might exclude the 'files' and 'dns' modules since libc has begun bundling them
+into the core of libc to make chroots easier, but for now everything referenced gets exported.
+It would require some kind of test to see if libc was new enough and compiled that way.
+
+=cut
+
+subtest nsswitch => sub {
+   subtest gentoo2026 => sub {
+      my $tmp= File::Temp->newdir;
+      mkdir "$tmp/etc";
+      eval { symlink "$tmp/etc", "$tmp/etc2" }
+         or skip_all "No symlink support on $^O";
+
+      mkfile "$tmp/etc/nsswitch.conf", <<~END;
+         # In alphabetical order. Re-order as required to optimize performance.
+         aliases:    files
+         ethers:     files
+         group:      files hesiod
+         gshadow:    files
+         hosts:      files dns
+         # Allow initgroups to default to the setting for group.
+         # initgroups: files
+         netgroup:   files
+         networks:   files dns
+         passwd:     files hesiod
+         protocols:  files
+         publickey:  files
+         rpc:        files
+         shadow:     files
+         services:   files
+         END
+      mkdir "$tmp/usr";
+      mkdir "$tmp/usr/lib64";
+      for (qw( libnss_compat.so.2 libnss_db.so.2 libnss_dns.so.2 libnss_files.so.2 libnss_hesiod.so.2 )) {
+         mkfile "$tmp/usr/lib64/$_", "pretend this is ELF", 0755;
+      }
+      symlink "usr/lib64", "$tmp/lib64";
+      # Yes Gentoo had symlinks pointing from usr/lib64 to ../../lib64
+      # even though /lib64 was a symlink to usr/lib64
+      symlink "../../lib64/libnss_compat.so.2", "$tmp/usr/lib64/libnss_compat.so";
+      symlink "../../lib64/libnss_db.so.2",     "$tmp/usr/lib64/libnss_db.so";
+      symlink "../../lib64/libnss_hesiod.so.2", "$tmp/usr/lib64/libnss_hesiod.so";
+
+      my $exporter= Sys::Export::Linux->new(src => "$tmp", dst => Sys::Export::MockDst->new());
+      is +{ $exporter->parse_nsswitch_conf },
+         {  aliases   => ['files'],
+            ethers    => ['files'],
+            group     => ['files','hesiod'],
+            gshadow   => ['files'],
+            hosts     => ['files','dns'],
+            netgroup  => ['files'],
+            networks  => ['files','dns'],
+            passwd    => ['files','hesiod'],
+            protocols => ['files'],
+            publickey => ['files'],
+            rpc       => ['files'],
+            shadow    => ['files'],
+            services  => ['files'],
+         },
+         'parse_nsswitch_conf';
+      $exporter->add_nsswitch_libs;
+      like $exporter->src_path_set,
+         {  'usr/lib64/libnss_dns.so.2'    => D,
+            'usr/lib64/libnss_files.so.2'  => D,
+            'usr/lib64/libnss_hesiod.so'   => D,
+            'usr/lib64/libnss_hesiod.so.2' => D,
+         },
+         'add_nsswitch_libs';
    };
 };
 

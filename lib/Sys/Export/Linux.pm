@@ -1,6 +1,6 @@
 package Sys::Export::Linux;
 
-# ABSTRACT: Export subsets of a Linux system
+# ABSTRACT: Export subsets of a Linux system, including GNU libc special cases
 # VERSION
 
 =head1 SYNOPSIS
@@ -15,7 +15,8 @@ package Sys::Export::Linux;
 
 =head1 DESCRIPTION
 
-This object extends L<Sys::Export::Unix> with Linux-specific helpers and special cases.
+This object extends L<Sys::Export::Unix> with Linux-specific and GNU-libc-specific helpers and
+special cases.  It also supports Linux without GNU libc, and possibly GNU libc without Linux.
 
 See C<Sys::Export::Unix> for the list of core attributes and methods.
 
@@ -156,10 +157,10 @@ sub _build_src_lib_path($self) {
   #    ...
   # )
 
-The GNU Libc "nsswitch" system lets you dynamically plug libraries to support various libc
-database lookups.  In the hashref data returned by this function, the key is the name of the
-database, like C<'hosts'> or C<'passwd'>, and the value is an arrayref of which plugins will be
-consulted, and in what order they will be queried.
+The GNU Libc "nsswitch" system lets you dynamically configure libraries to support various libc
+database lookups.  This method returns a name/value list (suitable for constructing a hashref)
+where the key is the name of the database, like C<'hosts'> or C<'passwd'>, and the value is an
+arrayref of which plugins will be queries, and in what order they will be queried.
 
 =cut
 
@@ -208,14 +209,13 @@ sub add_nsswitch_libs($self, @module_names) {
       }
       @module_names= sort keys %seen;
    }
-   my $abs= $self->src_abs;
    my @libpath= $self->src_lib_path_list;
    ns_module: for (@module_names) {
-      my $pattern= 'libnss_'.$_.'.*';
+      my $pattern= "libnss_$_.*";
       for my $libdir (@libpath) {
          $log->tracef("Look for %s in %s", $pattern, $libdir);
-         if (my @match= glob $abs . $pattern) {
-            $self->add(map substr($_, length $abs), @match);
+         if (my @match= $self->src_glob("$libdir/$pattern")) {
+            $self->add(@match);
             next ns_module;
          }
       }
