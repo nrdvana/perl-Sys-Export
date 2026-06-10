@@ -1,12 +1,14 @@
 package Test2AndUtils;
 use v5.26;
 use warnings;
+use FindBin;
 use Test2::V0 '!subtest';
 use Test2::Tools::Subtest 'subtest_streamed';
 use experimental qw( signatures );
 use parent 'Test2::V0';
-use File::Temp;
+use File::Temp ();
 use IO::Handle;
+our @CARP_NOT= qw( File::Temp );
 # Log::Any output merged into TAP stream is nice, but not required
 BEGIN {
    eval q{use Log::Any::Adapter 'TAP'; 1}
@@ -15,7 +17,7 @@ BEGIN {
 
 our @EXPORT= (
    @Test2::V0::EXPORT,
-   qw( explain mkfile slurp escape_nonprintable hexdump )
+   qw( explain mkfile slurp escape_nonprintable hexdump tmpfile tmpdir )
 );
 
 # Test2 runs async by default, which messes up the relation between warnings and the test
@@ -32,6 +34,32 @@ eval q{
    sub explain { Data::Dumper->new(\@_)->Terse(1)->Indent(1)->Sortkeys(1)->Dump }
    1
 } or die $@;
+
+sub tmpfile(%opts) {
+   $opts{TMPDIR}= 1;
+   # The rand seed has been set identical in every unit test, so to prevent collisions,
+   # prefix with test name.  Also generally helpful for debugging.
+   $opts{TEMPLATE} //= 'XXXXXX';
+   $opts{TEMPLATE}= ($FindBin::Script =~ s/\.t\z/-/r) . $opts{TEMPLATE};
+   my ($script_num)= ($FindBin::Script =~ /^(\d+)/);
+   $opts{UNLINK}= !$ENV{"DEBUG_$script_num"};
+   my $tmp= File::Temp->new(%opts);
+   diag "Leaving temp files at $tmp" unless $opts{UNLINK};
+   $tmp;
+}
+
+sub tmpdir(%opts) {
+   $opts{TMPDIR}= 1;
+   # The rand seed has been set identical in every unit test, so to prevent collisions,
+   # prefix with test name.  Also generally helpful for debugging.
+   $opts{TEMPLATE} //= 'XXXXXX';
+   $opts{TEMPLATE}= ($FindBin::Script =~ s/\.t\z/-/r) . $opts{TEMPLATE};
+   my ($script_num)= ($FindBin::Script =~ /^(\d+)/);
+   $opts{CLEANUP}= !$ENV{"DEBUG_$script_num"};
+   my $tmp= File::Temp->newdir(%opts);
+   diag "Leaving temp files at $tmp/*" unless $opts{CLEANUP};
+   $tmp;
+}
 
 # Convert data strings to and from C / Perl backslash notation.
 # Not exhaustive, just hit the most common cases and hex-escape the rest.

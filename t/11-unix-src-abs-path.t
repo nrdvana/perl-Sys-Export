@@ -4,12 +4,11 @@ use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
 use Cwd 'abs_path';
 use Test2AndUtils;
 use experimental qw( signatures );
-use File::Temp;
 use Sys::Export::Unix;
 use autodie;
 
 # Set up some symlinks
-my $tmp= File::Temp->newdir;
+my $tmp= tmpdir;
 my $tmp_abs= abs_path($tmp);
 mkdir "$tmp/usr";
 
@@ -23,7 +22,7 @@ symlink "/bin", "$tmp/usr/local/bin";
 symlink "bin", "$tmp/usr/local/sbin";
 symlink "$tmp_abs", "$tmp/self";
 
-my $exporter= Sys::Export::Unix->new(src => $tmp, dst => File::Temp->newdir);
+my $exporter= Sys::Export::Unix->new(src => $tmp, dst => tmpdir);
 note "exporter src: '".$exporter->src."'";
 
 for (
