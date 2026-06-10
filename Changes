@@ -7,6 +7,10 @@
     - Linux->parse_ld_so_conf
       This parses library paths from the GNU /etc/ld.so.conf file
       These are also added to the default for src_lib_path.
+    - Linux->parse_nsswitch_conf
+      Parses Gnu libc nss module names from /etc/nsswitch.conf
+    - Linux->add_nsswitch_libs
+      Adds Gnu libc nss .so libraries for anything mentioned in /etc/nsswitch.conf
   - API Changes:
     - Unix->src_exe_path / Unix->src_exe_path
       The attribute is now lowercase, but the src_exe_PATH is aliased for
