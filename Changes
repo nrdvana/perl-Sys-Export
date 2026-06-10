@@ -1,3 +1,4 @@
+2026-06-10 - Version 0.006
   - New Features:
     - Unix->src_lib_path / Unix->src_lib_path_list
       The library path searched for ELF libraries is now configurable
@@ -13,6 +14,7 @@
   - Bug fixes:
     - Support pack(Q) and unpack(Q) on 32-bit perls
     - Prevent attempting Linux strace on non-Linux OS
+    - Support symlinks on Win32
   - Require perl 5.28, for list-context state variables
 
 2026-06-06 - Version 0.005
