@@ -4,8 +4,8 @@ use lib (__FILE__ =~ s,[^\\/]+$,lib,r);
 use Test2AndUtils;
 use experimental qw( signatures );
 use Sys::Export::Unix;
+use Sys::Export qw( S_IFMT S_IFDIR S_IFREG S_IFLNK S_ISLNK );
 use File::stat;
-use Fcntl qw( S_IFDIR S_IFREG S_IFLNK S_ISLNK );
 use autodie;
 
 # Set up some symlinks
@@ -17,8 +17,9 @@ mkdir "$tmp/usr";
 mkdir "$tmp/usr/local";
 mkdir "$tmp/usr/local/bin";
 mkfile "$tmp/usr/local/bin/script", "#! /bin/sh\n", 0755;
+
 skip_all "symlinks not supported on this host"
-   unless eval { symlink "./script", "$tmp/usr/local/bin/script2" };
+   unless eval { symlink "script", "$tmp/usr/local/bin/script2" };
 
 my $exporter= Sys::Export::Unix->new(src => $tmp, dst => tmpdir);
 note "exporter src: '".$exporter->src."' dst: '".$exporter->dst."'";
@@ -58,7 +59,11 @@ for (@tests) {
    ok( my $stat= lstat($exporter->dst_abs . $_->[0]), "$_->[0] exists" );
    my $mode= $stat->mode;
    $mode |= 0777 if S_ISLNK($mode);
-   is( $mode, $_->[1], "$_->[0] mode" );
+   if ($^O eq 'MSWin32') {
+      is( $mode & S_IFMT, $_->[1] & S_IFMT, "$_->[0] mode" );
+   } else {
+      is( $mode, $_->[1], "$_->[0] mode" );
+   }
 }
 
 done_testing;

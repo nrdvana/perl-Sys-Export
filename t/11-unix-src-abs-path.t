@@ -35,17 +35,21 @@ for (
    is( $exporter->_src_abs_path( $_->[0] ), $_->[1], $_->[0] );
 }
 
-$exporter= Sys::Export::Unix->new(src => '/', dst => File::Temp->newdir);
-note "exporter src: '".$exporter->src."'";
-for (
-   [ "$tmp_abs/self"               => substr($tmp_abs,1) ],
-   # hide these from systems where /bin is a symlink or doesn't exist
-   (-d '/bin' && !-l '/bin'? (
-      [ "$tmp_abs/usr/local/bin"      => 'bin' ],
-      [ "$tmp_abs/usr/local/sbin"     => 'bin' ]
-   ) : ()),
-) {
-   is( $exporter->_src_abs_path( $_->[0] ), $_->[1], $_->[0] );
+# Win32 drive letters mess up this test, and exporting from '/' doesn't make sense
+# anyway, if the host is Win32.
+unless ($^O eq 'MSWin32') {
+   $exporter= Sys::Export::Unix->new(src => '/', dst => tmpdir);
+   note "exporter src: '".$exporter->src."'";
+   for (
+      [ "$tmp_abs/self"               => substr($tmp_abs,1) ],
+      # hide these from systems where /bin is a symlink or doesn't exist
+      (-d '/bin' && !-l '/bin'? (
+         [ "$tmp_abs/usr/local/bin"      => 'bin' ],
+         [ "$tmp_abs/usr/local/sbin"     => 'bin' ]
+      ) : ()),
+   ) {
+      is( $exporter->_src_abs_path( $_->[0] ), $_->[1], $_->[0] );
+   }
 }
 
 done_testing;

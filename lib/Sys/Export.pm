@@ -10,13 +10,25 @@ use Carp;
 use Scalar::Util qw( blessed looks_like_number );
 use Sys::Export::LogAny '$log';
 use Exporter ();
+use Fcntl ':mode';
 BEGIN {
    # Fcntl happily exports macros that don't exist, then fails at runtime.
    # Replace non-existent test macros with 'false', and nonexistent modes with 0.
-   require Fcntl;
-   eval { Fcntl->can($_)->($_ =~ /_IS/? (0) : ()); 1 }? Fcntl->import($_) : eval "sub $_ { 0 }"
-      for qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
-              S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT );
+   # But, on MSWin32, the constant for S_IFLNK is 0x4000 and just isn't defined in Fcntl
+   # because the headers don't define it.
+   for (qw( S_ISREG S_ISDIR S_ISLNK S_ISBLK S_ISCHR S_ISFIFO S_ISSOCK S_ISWHT
+            S_IFREG S_IFDIR S_IFLNK S_IFBLK S_IFCHR S_IFIFO  S_IFSOCK S_IFWHT S_IFMT )
+   ) {
+      next if eval { __PACKAGE__->can($_)->($_ =~ /_IS/? (0) : ()); 1 };
+      delete ${Sys::Export::}{$_};
+      if ($^O eq 'MSWin32' && $_ eq 'S_IFLNK') {
+         eval 'sub Sys::Export::S_IFLNK { 0x6000 } 1' or die "S_IFLNK $@";
+      } elsif ($^O eq 'MSWin32' && $_ eq 'S_ISLNK') {
+         eval 'sub Sys::Export::S_ISLNK { S_IFMT($_[0]) == 0x6000 } 1' or die "S_ISLNK $@";
+      } else {
+         eval "sub Sys::Export::$_ { 0 } 1" or die "$@";
+      }
+   }
 }
 our @EXPORT_OK= qw(
    isa_exporter isa_export_dst isa_userdb isa_user isa_group exporter isa_hash isa_array isa_int

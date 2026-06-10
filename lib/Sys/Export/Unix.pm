@@ -540,6 +540,7 @@ sub _chroot_abs_path($self, $root, $path) {
       elsif (S_ISLNK($mode)) {
          return undef if --$lim <= 0;
          defined (my $newpath= readlink $abs) or return undef;
+         $newpath =~ s{\\}{/}g if $^O eq 'MSWin32';
          @abs= @base if $newpath =~ m,^/,;
          unshift @parts, grep length && $_ ne '.', split '/', $newpath;
       }
@@ -1025,8 +1026,10 @@ an executable of the given name.  The paths are set in attribute L</src_exe_PATH
 
 sub src_which($self, $name) {
    $name =~ m,/, and croak '->src_which($name) should not include a path separator';
-   for ($self->src_exe_PATH_list) {
-      return "$_/$name" if -x $self->src_abs . "$_/$name";
+   for ($self->src_exe_path_list) {
+      return "$_/$name" if -x $self->src_abs . "$_/$name"
+                        # -x isn't meaningful on Win32, so fall back to -e
+                        or $^O eq 'MSWin32' && -e _;
    }
    return undef;
 }

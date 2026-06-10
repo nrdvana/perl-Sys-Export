@@ -32,6 +32,9 @@ subtest defaults => sub {
 
 # When src is '/', $PATH gets added to src_exe_path
 subtest include_PATH => sub {
+   skip_all "exporting '/' doesn't make sense on Win32"
+      if $^O eq 'MSWin32';
+
    mkdir "$tmp/opt";
    mkdir "$tmp/opt/bin";
    mkdir "$tmp/opt/bin2";
@@ -39,15 +42,15 @@ subtest include_PATH => sub {
    my $unique_name= "probably-doesnt-exist-on-host-".int(rand(9999));
    mkfile "$tmp/opt/bin2/$unique_name", "#! /bin/true\n", 0755;
 
-   local $ENV{PATH}= "$tmp/opt/bin:$tmp/opt/bin2";
+   local $ENV{PATH}= "$tmp_abs/opt/bin:$tmp_abs/opt/bin2";
    
-   my $exporter= Sys::Export::Unix->new(src => '/', dst => File::Temp->newdir);
+   my $exporter= Sys::Export::Unix->new(src => '/', dst => tmpdir);
    note "exporter src: '".$exporter->src."'";
 
    # No guarantees which host bin directories exist, but make sure our custom ones
    # from $PATH got added
-   like( $exporter->src_exe_path, qr{\Q$tmp/opt/bin:$tmp/opt/bin2\E}, 'src_exe_path' );
-   is( $exporter->src_which($unique_name), substr("$tmp/opt/bin2/$unique_name",1), qq{which "$unique_name"} );
+   like( $exporter->src_exe_path, qr{\Q$tmp_abs/opt/bin:$tmp_abs/opt/bin2\E}, 'src_exe_path' );
+   is( $exporter->src_which($unique_name), substr("$tmp_abs/opt/bin2/$unique_name",1), qq{which "$unique_name"} );
 };
 
 done_testing;
