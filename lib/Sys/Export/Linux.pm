@@ -41,14 +41,14 @@ sub _build__trace_deps {
          $self->{cmd_path_chroot} //= do {
             chomp(my $chroot= `which chroot`);
             -x $chroot or croak "chroot command not available or not executable";
-            $self->{_log_trace}->("chroot binary at $chroot") if $self->{_log_trace};
+            $self->log->trace("chroot binary at $chroot");
             $chroot;
          };
       }
       $self->{cmd_path_strace} //= do {
          chomp(my $strace= `which strace`);
          -x $strace or croak "strace command not available or not executable";
-         $self->{_log_trace}->("strace binary at $strace") if $self->{_log_trace};
+         $self->log->trace("strace binary at $strace");
          $strace;
       };
       return $self->can('_trace_deps_linux_strace');

@@ -369,13 +369,18 @@ sub _build_src_lib_path($self) {
 #=cut
 
 sub _can_run_in_src($self) {
-   $self->{can_run_in_src} //= ($self->src_abs eq '/' or eval { $self->_run_in_src('sh','-c','exit 0'); 1 });
+   $self->{can_run_in_src} //= (
+      $self->src_abs eq '/'
+      or eval { $self->_run_in_src('true') == 0 }
+   );
 }
 sub _run_in_src($self, $cmd, @args) {
    my $src_abs= $self->src_abs;
-   if ($cmd !~ m,/, && !-x $src_abs . $cmd) { # not an absolute path
+   $self->log->tracef("_run_in_src %s", [$cmd, @args]);
+   if ($cmd !~ m,^/, && !-x $src_abs . $cmd) { # not an absolute path
       my $path= $self->src_which($cmd)
          // croak "Can't locate '$cmd' under $src_abs in PATH=".$self->src_exe_PATH;
+      $self->log->tracef("  resolved %s as %s", $cmd, $path);
       $cmd= $path;
    }
    pipe(my $err_r, my $err_w) // croak "pipe: $!";
@@ -393,6 +398,7 @@ sub _run_in_src($self, $cmd, @args) {
       POSIX::_exit(1);
    }
    else {
+      $err_w->close;
       local $/;
       my $err= <$err_r>;
       if (length $err) {
