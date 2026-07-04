@@ -96,6 +96,7 @@ An instance of L<Log::Any> logger, or compatible object.
 use v5.26;
 use warnings;
 use experimental qw( signatures );
+use mro 'c3';
 use Carp qw( croak carp );
 use Cwd qw( abs_path );
 use Scalar::Util qw( blessed looks_like_number );
