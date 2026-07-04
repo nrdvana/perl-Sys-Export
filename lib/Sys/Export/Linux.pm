@@ -36,15 +36,6 @@ sub _build__trace_deps {
    if ($self->_can_run_in_src) {
       # Seems Solaris has an 'strace' but it isn't compatible enough to pass tests.
       $^O eq 'linux' or croak "Only Linux strace is supported";
-      # Are we going to attempt chrooting?
-      if ($self->src_abs ne '/') {
-         $self->{cmd_path_chroot} //= do {
-            chomp(my $chroot= `which chroot`);
-            -x $chroot or croak "chroot command not available or not executable";
-            $self->log->trace("chroot binary at $chroot");
-            $chroot;
-         };
-      }
       $self->{cmd_path_strace} //= do {
          chomp(my $strace= `which strace`);
          -x $strace or croak "strace command not available or not executable";
@@ -57,9 +48,8 @@ sub _build__trace_deps {
 }
 
 sub _trace_deps_linux_strace($self, @argv) {
-   # Are we going to attempt chrooting?
-   unshift @argv, $self->{cmd_path_chroot}, $self->src_abs
-      unless $self->src_abs eq '/';
+   my @strace= [ $self->{cmd_path_strace}, -o => "/proc/self/fd/3", -e => 'trace=open,openat', @argv ];
+   $self->log->tracef("  -> %s", @strace);
    # Tell strace to write to a pipe, while redirecting command output to /dev/null
    open my $devnull, '+<', '/dev/null' or croak "open(/dev/null): $!";
    pipe(my $r, my $w) // croak "pipe: $!";
@@ -70,14 +60,15 @@ sub _trace_deps_linux_strace($self, @argv) {
       close $err_r;
       eval {
          chdir $self->src_abs or die "chdir: $!";
+         chroot $self->src_abs or die "chroot: $!"
+            unless $self->src_abs eq '/';
          POSIX::dup2(fileno $devnull, 0) or die "dup2(->0): $!";
          POSIX::dup2(fileno $devnull, 1) or die "dup2(->1): $!";
          POSIX::dup2(fileno $devnull, 2) or die "dup2(->2): $!";
          POSIX::dup2(fileno $w, 3) or die "dup2(->3): $!";
          $^F= 3;
-         unshift @argv, $self->{cmd_path_strace}, -o => "/proc/self/fd/3", -e => 'trace=open,openat';
-         exec @argv
-            or die "exec(@argv): $!";
+         exec @strace
+            or die "exec(@strace): $!";
       };
       $err_w->print($@);
       $err_w->close;
@@ -92,15 +83,16 @@ sub _trace_deps_linux_strace($self, @argv) {
          waitpid($pid, 0);
          die $err;
       }
-      $self->{_log_trace}->("Reading strace output") if $self->{_log_trace};
+      my $is_trace= $self->log->is_trace;
+      $self->log->trace("Reading strace output") if $is_trace;
       while (<$r>) {
-         $self->{_log_trace}->($_) if $self->{_log_trace};
+         $self->log->tracef("strace %s", $_);
          $deps{$1}= 1 if /^open(?:at)?\(.*?"(.*?)",.*?= [0-9]/;
       }
-      $self->{_log_trace}->("Done reading strace") if $self->{_log_trace};
+      $self->log->trace("Done reading strace") if $is_trace;
       waitpid($pid,0);
       my $wstat= $?;
-      $self->{_log_trace}->("Command exited with $wstat") if $self->{_log_trace};
+      $self->log->trace("Command exited with $wstat") if $is_trace;
       croak "straced command failed: wstat = $wstat"
          if $wstat;
       return \%deps;
