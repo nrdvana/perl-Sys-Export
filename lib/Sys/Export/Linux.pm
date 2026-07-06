@@ -48,7 +48,7 @@ sub _build__trace_deps {
 }
 
 sub _trace_deps_linux_strace($self, @argv) {
-   my @strace= [ $self->{cmd_path_strace}, -o => "/proc/self/fd/3", -e => 'trace=open,openat', @argv ];
+   my @strace= ( $self->{cmd_path_strace}, -e => 'trace=open,openat', @argv );
    $self->log->tracef("  -> %s", @strace);
    # Tell strace to write to a pipe, while redirecting command output to /dev/null
    open my $devnull, '+<', '/dev/null' or croak "open(/dev/null): $!";
@@ -63,10 +63,8 @@ sub _trace_deps_linux_strace($self, @argv) {
          chroot $self->src_abs or die "chroot: $!"
             unless $self->src_abs eq '/';
          POSIX::dup2(fileno $devnull, 0) or die "dup2(->0): $!";
-         POSIX::dup2(fileno $devnull, 1) or die "dup2(->1): $!";
-         POSIX::dup2(fileno $devnull, 2) or die "dup2(->2): $!";
-         POSIX::dup2(fileno $w, 3) or die "dup2(->3): $!";
-         $^F= 3;
+         POSIX::dup2(fileno $w, 1)       or die "dup2(->1): $!";
+         POSIX::dup2(fileno $w, 2)       or die "dup2(->2): $!";
          exec @strace
             or die "exec(@strace): $!";
       };
