@@ -86,7 +86,9 @@ use Scalar::Util qw( blessed );
 our @CARP_NOT= qw( Sys::Export::Unix );
 use Cwd qw( abs_path );
 use Sys::Export qw( :stat_modes :stat_tests isa_hash );
+use Sys::Export::LogAny '$log';
 require Sys::Export::Unix;
+my sub perms($mode) { $mode & 0xFFF }
 
 sub new {
    my $class= shift;
@@ -200,8 +202,9 @@ sub add($self, $file) {
    my $mode= $file->{mode} // croak "attribute 'mode' is required, for '$file->{name}'";
    # Does it already exist?
    my $dst_abs= $self->dst_abs . $file->{name};
-   my %old= (name => $file->{name});
+   my %old;
    if (@old{qw( dev ino mode nlink uid gid rdev size atime mtime)}= lstat($dst_abs)) {
+      $old{name}= $file->{name};
       my $action= $self->on_collision // 'croak';
       # Nothing to do if user wants collisions ignored
       return !!0 if $action eq 'ignore';
@@ -214,16 +217,16 @@ sub add($self, $file) {
                // croak "Unknown on_collision action '$action'";
          return !!0 if $action eq 'ignore';
          croak $difference unless $action eq 'overwrite';
-         # overwrite, but directory might not be empty, so handle that later
-         unlink $dst_abs unless S_ISDIR($old{mode});
+         # overwrite; proceed to below
       }
    }
-   return S_ISREG($mode)? $self->_add_file($file)
-        : S_ISDIR($mode)? $self->_add_dir($file, (defined $old{mode}? \%old : undef))
-        : S_ISLNK($mode)? $self->_add_symlink($file)
-        : (S_ISBLK($mode) || S_ISCHR($mode))? $self->_add_devnode($file)
-        : S_ISFIFO($mode)? $self->_add_fifo($file)
-        : S_ISSOCK($mode)? $self->_add_socket($file)
+   my $old= defined $old{mode}? \%old : undef;
+   return S_ISREG($mode)? $self->_add_file($file, $old)
+        : S_ISDIR($mode)? $self->_add_dir($file, $old)
+        : S_ISLNK($mode)? $self->_add_symlink($file, $old)
+        : (S_ISBLK($mode) || S_ISCHR($mode))? $self->_add_devnode($file, $old)
+        : S_ISFIFO($mode)? $self->_add_fifo($file, $old)
+        : S_ISSOCK($mode)? $self->_add_socket($file, $old)
         : croak "Can't export ".(S_ISWHT($mode)? 'whiteout entries' : '(unknown)')
             .': "'.($file->{src_path} // $file->{name}).'"'
 }
@@ -261,10 +264,12 @@ sub _compare_dirent($self, $file, $old) {
       unless $file->{mode} == $old->{mode};
 
    if (S_ISREG($file->{mode})) {
-      # compare file contents
+      # compare file contents.  $old always defines ->{size}, but $file might not.
+      # Store result in old->{contents_same} for use below.
+      $old->{contents_same}= (defined $file->{size} && $file->{size} != $old->{size})
+         || !$self->_contents_same($file, $dst_abs);
       return "Attempt to overwrite $dst_abs with different content"
-         if (defined $file->{size} && $file->{size} != $old->{size})
-            || !_contents_same($file, $dst_abs);
+         unless $old->{contents_same};
    }
    elsif (S_ISBLK($file->{mode}) || S_ISCHR($file->{mode})) {
       # compare major/minor numbers
@@ -275,9 +280,17 @@ sub _compare_dirent($self, $file, $old) {
 }
 
 # Compare file contents for equality
-sub _contents_same($file, $dst_abs) {
+sub _contents_same($self, $file, $dst_abs) {
    my $dst_data= Sys::Export::map_or_load_file($dst_abs);
-   return ${$file->{data}} eq $$dst_data;
+   my $data= $file->{data};
+   # See if this is supposed to be a hardlink
+   if (!defined $data && $file->{nlink} > 1) {
+      my $already= $self->_link_map->{"$file->{dev}:$file->{ino}"}
+         // croak "no 'data' supplied, nlink > 1, but dev:ino $file->{dev}:$file->{ino} have not been seen yet";
+      # Yep, load the linked data instead of using ->{data}
+      $data= Sys::Export::map_or_load_file($already);
+   }
+   return $$data eq $$dst_data;
 }
 
 # compare device nodes for equality
@@ -295,12 +308,17 @@ sub _rdev_same($file, $old) {
 }
 
 # Install a file into ->dst
-sub _add_file($self, $file) {
+sub _add_file($self, $file, $old) {
    my $dst= $self->dst_abs . $file->{name};
    # See if this is supposed to be a hardlink
    if ($file->{nlink} > 1) {
       if (defined(my $already= $self->_link_map->{"$file->{dev}:$file->{ino}"})) {
          # Yep, make a link of that file instead of copying again
+         if ($old) {
+            # but save the syscall if it already exists
+            return !!1 if $old->{dev} == $file->{dev} && $old->{ino} == $file->{ino};
+            unlink $dst;
+         }
          link($already, $dst)
             or croak "link($already, $dst): $!";
          return !!1;
@@ -309,71 +327,103 @@ sub _add_file($self, $file) {
    # Record all file inodes in case a delayed hardlink is created by the caller
    $self->_link_map->{"$file->{dev}:$file->{ino}"}= $dst
       if defined $file->{dev} && defined $file->{ino};
-   # Write data into a temp file on same filesystem, then rename it into place
-   #  to ensure we never write a partial file into the destination.
-   # But, check if the caller gave us a LazyFileData within our ->tmp directory.
-   my $tmp;
-   if (blessed $file->{data} && $file->{data}->can('abs_path')
-      && substr($file->{data}->abs_path//'', 0, length $self->tmp) eq $self->tmp
-   ) {
-      $tmp= $file->{data}->abs_path;
+   # No need to write a new file if the existing file has the same contents
+   if ($old && $old->{contents_same}) {
+      # Apply matching permissions and ownership
+      $self->_apply_stat($dst, $file, $old);
    } else {
-      $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
-      Sys::Export::Unix::_syswrite_all($tmp, $file->{data});
+      # Write data into a temp file on same filesystem, then rename it into place
+      #  to ensure we never write a partial file into the destination.
+      # But, check if the caller gave us a LazyFileData within our ->tmp directory.
+      my $tmp;
+      if (blessed $file->{data} && $file->{data}->can('abs_path')
+         && substr($file->{data}->abs_path//'', 0, length $self->tmp) eq $self->tmp
+      ) {
+         $tmp= $file->{data}->abs_path;
+      } else {
+         $tmp= File::Temp->new(DIR => $self->tmp, UNLINK => 0);
+         Sys::Export::Unix::_syswrite_all($tmp, $file->{data});
+      }
+      # Apply matching permissions and ownership
+      $self->_apply_stat("$tmp", $file);
+      # Rename the temp file into place
+      rename($tmp, $dst) or croak "rename($tmp, $dst): $!";
    }
-   # Apply matching permissions and ownership
-   $self->_apply_stat("$tmp", $file);
-   # Rename the temp file into place
-   rename($tmp, $dst) or croak "rename($tmp, $dst): $!";
 }
 
 # Install a dir into ->dst, unless it already exists
 sub _add_dir($self, $dir, $old) {
    my $dst_abs= $self->dst_abs . $dir->{name};
-   # If the directory already exists, just apply the permissions
-   mkdir($dst_abs) || croak "mkdir($dst_abs): $!"
-      unless $old;
-   $self->_apply_stat($dst_abs, $dir);
+   # If overwriting, need to unlink if it wasn't a directroy
+   if ($old && S_ISDIR($old->{mode})) {
+      $self->_apply_stat($dst_abs, $dir, $old);
+   } else {
+      unlink $dst_abs if $old;
+      mkdir($dst_abs) || croak "mkdir($dst_abs): $!";
+      $self->_apply_stat($dst_abs, $dir);
+   }
 }
 
 # Install a symlink into ->dst
-sub _add_symlink($self, $file) {
+sub _add_symlink($self, $file, $old) {
    my $dst_abs= $self->dst_abs . $file->{name};
    length $file->{data}
       or croak "Missing symlink contents for $file->{name}";
-   symlink($file->{data}, $dst_abs)
-      or croak "symlink($file->{data}, $dst_abs): $!";
-   $self->_apply_stat($dst_abs, $file);
+   if ($old && S_ISLNK($old->{mode}) && readlink($dst_abs) eq $file->{data}) {
+      $self->_apply_stat($dst_abs, $file, $old);
+   } else {
+      unlink $dst_abs if $old;
+      symlink($file->{data}, $dst_abs)
+         or croak "symlink($file->{data}, $dst_abs): $!";
+      $self->_apply_stat($dst_abs, $file);
+   }
 }
 
 # Install a device node into ->dst
-sub _add_devnode($self, $file) {
-   if (defined $file->{rdev} && (!defined $file->{rdev_major} || !defined $file->{rdev_minor})) {
-      my ($major,$minor)= Sys::Export::Unix::_dev_major_minor($file->{rdev});
-      $file->{rdev_major} //= $major;
-      $file->{rdev_minor} //= $minor;
-   }
+sub _add_devnode($self, $file, $old) {
    my $dst_abs= $self->dst_abs . $file->{name};
-   Sys::Export::Unix::_mknod_or_die($dst_abs, $file->{mode}, $file->{rdev_major}, $file->{rdev_minor});
+   my ($major, $minor)= @{$file}{qw( rdev_major rdev_minor )};
+   if (defined $file->{rdev} && (!defined $major || !defined $minor)) {
+      ($major,$minor)= Sys::Export::Unix::_dev_major_minor($file->{rdev});
+   }
+   if ($old && S_IFMT($old->{mode}) == S_IFMT($file->{mode}) && defined $old->{rdev}) {
+      my ($old_maj, $old_min)= Sys::Export::Unix::_dev_major_minor($old->{rdev});
+      if ($old_maj == $major && $old_min == $minor) {
+         $self->_apply_stat($dst_abs, $file, $old);
+         return;
+      }
+   }
+   unlink $dst_abs if $old;
+   Sys::Export::Unix::_mknod_or_die($dst_abs, $file->{mode}, $major, $minor);
    $self->_apply_stat($dst_abs, $file);
 }
 
 # Install a fifo into ->dst
-sub _add_fifo($self, $file) {
+sub _add_fifo($self, $file, $old) {
    require POSIX;
    my $dst_abs= $self->dst_abs . $file->{name};
-   POSIX::mkfifo($dst_abs, $file->{mode})
-      or croak "mkfifo($dst_abs): $!";
-   $self->_apply_stat($dst_abs, $file);
+   if ($old && S_IFMT($old->{mode}) == S_IFMT($file->{mode})) {
+      $self->_apply_stat($dst_abs, $file, $old);
+   } else {
+      unlink $dst_abs if $old;
+      POSIX::mkfifo($dst_abs, $file->{mode})
+         or croak "mkfifo($dst_abs): $!";
+      $self->_apply_stat($dst_abs, $file);
+   }
 }
 
 # Bind a socket (thus creating it) in ->dst
-sub _add_socket($self, $file) {
+sub _add_socket($self, $file, $old) {
    require Socket;
    my $dst_abs= $self->dst_abs . $file->{name};
-   socket(my $s, Socket::AF_UNIX(), Socket::SOCK_STREAM(), 0) or die "socket: $!";
-   bind($s, Socket::pack_sockaddr_un($dst_abs)) or die "Failed to bind socket at $dst_abs: $!";
-   $self->_apply_stat($dst_abs, $file);
+   if ($old && S_IFMT($old->{mode}) == S_IFMT($file->{mode})) {
+      $self->_apply_stat($dst_abs, $file, $old);
+   } else {
+      unlink $dst_abs if $old;
+      socket(my $s, Socket::AF_UNIX(), Socket::SOCK_STREAM(), 0) or die "socket: $!";
+      bind($s, Socket::pack_sockaddr_un($dst_abs)) or die "Failed to bind socket at $dst_abs: $!";
+      $self->_apply_stat($dst_abs, $file);
+   }
 }
 
 =method finish
@@ -394,9 +444,14 @@ sub finish($self) {
 }
 
 # Apply permissions and mtime to a path
-sub _apply_stat($self, $abs_path, $stat) {
-   my ($mode, $uid, $gid, $atime, $mtime)= (lstat $abs_path)[2,4,5,8,9]
-      or croak "Failed to stat file just created at '$abs_path': $!";
+sub _apply_stat($self, $abs_path, $stat, $existing=undef) {
+   my ($mode, $uid, $gid, $atime, $mtime);
+   if ($existing) {
+      ($mode, $uid, $gid, $atime, $mtime)= @{$existing}{qw( mode uid gid atime mtime )};
+   } else {
+      (($mode, $uid, $gid, $atime, $mtime)= (lstat $abs_path)[2,4,5,8,9])
+         or croak "Failed to stat file just created at '$abs_path': $!";
+   }
    my $change_uid= defined $stat->{uid} && $stat->{uid} != $uid;
    my $change_gid= defined $stat->{gid} && $stat->{gid} != $gid;
    if ($change_uid || $change_gid) {
@@ -411,15 +466,15 @@ sub _apply_stat($self, $abs_path, $stat) {
    my @delayed;
 
    # Don't change permission bits on symlinks
-   if (!S_ISLNK($mode) && ($mode & 0xFFF) != ($stat->{mode} & 0xFFF)) {
+   if (!S_ISLNK($mode) && perms($mode) != perms($stat->{mode})) {
       # If changing permissions on a directory to something that removes our ability
       # to write to it, delay this change until the end.
       if (S_ISDIR($mode) && !(($stat->{mode} & 0222) && ($stat->{mode} & 0111))) {
          push @delayed, 'chmod';
       }
       else {
-         chmod $stat->{mode}&0xFFF, $abs_path
-            or croak sprintf "chmod(0%o, %s): $!", $stat->{mode}&0xFFF, $abs_path;
+         chmod perms($stat->{mode}), $abs_path
+            or croak sprintf "chmod(0%o, %s): $!", perms($stat->{mode}), $abs_path;
       }
    }
 
@@ -440,8 +495,8 @@ sub _apply_stat($self, $abs_path, $stat) {
 }
 sub _delayed_apply_stat($self, $abs_path, $stat, @delayed) {
    if (grep $_ eq 'chmod', @delayed) {
-      chmod $stat->{mode}&0xFFF, $abs_path
-         or croak sprintf "chmod(0%o, %s): $!", $stat->{mode}&0xFFF, $abs_path;
+      chmod perms($stat->{mode}), $abs_path
+         or croak sprintf "chmod(0%o, %s): $!", perms($stat->{mode}), $abs_path;
    }
    if (grep $_ eq 'utime', @delayed) {
       utime $stat->{atime}, $stat->{mtime}, $abs_path
