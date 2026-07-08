@@ -266,8 +266,8 @@ sub _compare_dirent($self, $file, $old) {
    if (S_ISREG($file->{mode})) {
       # compare file contents.  $old always defines ->{size}, but $file might not.
       # Store result in old->{contents_same} for use below.
-      $old->{contents_same}= (defined $file->{size} && $file->{size} != $old->{size})
-         || !$self->_contents_same($file, $dst_abs);
+      $old->{contents_same}= (!defined $file->{size} || $file->{size} == $old->{size})
+                          && $self->_contents_same($file, $dst_abs);
       return "Attempt to overwrite $dst_abs with different content"
          unless $old->{contents_same};
    }

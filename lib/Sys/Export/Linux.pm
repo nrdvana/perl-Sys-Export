@@ -150,7 +150,7 @@ sub _build_src_lib_path($self) {
 The GNU Libc "nsswitch" system lets you dynamically configure libraries to support various libc
 database lookups.  This method returns a name/value list (suitable for constructing a hashref)
 where the key is the name of the database, like C<'hosts'> or C<'passwd'>, and the value is an
-arrayref of which plugins will be queries, and in what order they will be queried.
+arrayref of which plugins will be queried, in the order they will be attempted.
 
 =cut
 
@@ -184,8 +184,8 @@ This method defaults to the set of all modules returned by L</parse_nsswitch_con
 adds libraries for each of them, like C<"lib64/libnss_dns.so.2">.  Missing libraries generate a
 warning (not an exception).
 
-With newer glibc, the modules 'files' and 'dns' are built-in, to aid with chroots, though the
-libnss_files.so and libnss_dns.so still exist in the lib directory.
+With newer glibc, the modules 'files' and 'dns' are built-in to aid with chroots, though the
+C<libnss_files.so> and C<libnss_dns.so> still exist in the lib directory.
 This method doesn't attempt to add a special case for omitting them.
 
 =cut
